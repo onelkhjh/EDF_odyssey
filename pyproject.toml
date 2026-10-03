@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tms-pc"
+version = "0.1.0"
+description = "Modular TMS operation and analysis software"
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.7,<7", "pyqtgraph>=0.13,<1", "pyserial>=3.5,<4", "numpy>=2,<3", "pandas>=2.2,<4", "scipy>=1.13,<2"]
+
+[project.scripts]
+tms-pc = "tms_pc.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
