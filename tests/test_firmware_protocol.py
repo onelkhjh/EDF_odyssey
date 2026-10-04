@@ -174,7 +174,10 @@ def test_stale_status_sends_safe_then_requires_reconnect(app):
         expected.queued_at -= 2
     c._tick()
     c._tick()
-    assert not c.state.connected and not c.accept_packets
+    assert c.state.connected and c.accept_packets
+    assert c.hardware_status_lost
+    with pytest.raises(ValueError, match="Stale firmware STATUS"):
+        c.request(PacketType.COMMAND_THRUST, 10)
     assert "RECONNECT" in c.message
 
 

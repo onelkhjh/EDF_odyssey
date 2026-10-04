@@ -65,7 +65,8 @@ def decode_report(payload: bytes) -> FirmwareReport:
     voltage, current, pressure, battery = tuple(x if analog and math.isfinite(x) else math.nan for x in (voltage, current, pressure, battery))
     load = load if valid and calibrated & 1 and math.isfinite(load) else math.nan
     status = Status(MODES[mode], bool(running), bool(enabled), thrust, bool(acquiring), math.nan, math.nan)
-    telemetry = Telemetry(runtime, voltage, current, load, pressure, float(raw[0]) if valid else math.nan)
+    telemetry = Telemetry(runtime, voltage, current, load, pressure, float(raw[0]) if valid else math.nan,
+                          *(float(raw[i]) if valid else math.nan for i in (3, 2, 1, 4)))
     thruster_payload = payload[THRUSTER_OFFSET:THRUSTER_OFFSET + REPORT_PAYLOAD_BYTES]
     thruster = ReportDecoder(byte_order="little").decode(thruster_payload)
     return FirmwareReport(status, telemetry, raw, bool(valid), calibrated, battery, counter, fault, age, thruster_payload, thruster)

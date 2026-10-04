@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import time
 import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.exporters
@@ -63,6 +64,9 @@ class MainWindow(QMainWindow):
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.receive_status = QLabel("수신: TMS 상태 보고 대기 중")
+        self.receive_status.setWordWrap(True)
+        layout.addWidget(self.receive_status)
         split = QSplitter()
         navigation = QListWidget()
         navigation.addItems(["Standby", "Calibration", "Measurement", "Analysis"])
@@ -85,7 +89,8 @@ class MainWindow(QMainWindow):
         safety = QLabel("PC는 안전 시스템이 아닙니다. 최종 추진기 정지와 통신 Timeout 안전 동작은 TMS Firmware가 수행합니다.")
         safety.setStyleSheet("color: #9a3412; background: #fff7ed; padding: 8px;")
         layout.addWidget(safety)
-        controller.changed.connect(self.update_state)
+        # The GUI timer renders the newest state; reports can arrive faster than the screen refresh.
+        controller.changed.connect(lambda: self.update_state() if not controller.hardware else None)
         controller.warning.connect(self.show_error)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_live)
@@ -497,15 +502,32 @@ class MainWindow(QMainWindow):
         self.apply_calibration.setEnabled(ready and not c.hardware and s.mode == Mode.CALIBRATION and not s.acquire and self.factors is not None)
         self.loss_button.setEnabled(linked and c.transport is not None)
         self.message.setText(c.message)
+        self.receive_status.setText("수신: TMS 상태 보고 대기 중" if linked else "수신: 연결되지 않음")
         if c.hardware and c.hardware_report is not None:
             report = c.hardware_report
+            elapsed_ms = max(0, int((time.monotonic() - c.last_status_at) * 1000))
+            io = c.communication
+            rx_age = f"{max(0, int((time.monotonic() - io.last_bytes_at) * 1000))} ms" if io.last_bytes_at else "수신 대기"
+            processing_ms = max(0, int((io.last_report_at - c.last_status_at) * 1000))
+            self.receive_status.setText(
+                f"TMS 보고 수신: Counter {report.counter} | 마지막 수신 {elapsed_ms} ms 전 | "
+                f"USB {io.rx_bytes} bytes / 마지막 {rx_age} 전 | 처리 대기 {processing_ms} ms | "
+                f"RAW ADC {list(report.raw)} | ADC valid {int(report.valid)} | "
+                f"로드셀 보정 {'완료' if report.calibrated & 1 else '미완료'} | "
+                f"전압·전류·압력 보정 {'완료' if report.calibrated & 2 else '미완료'} | "
+                "미보정 물리값은 N/A로 표시됩니다.")
             self.status.setText(self.status.text() + f" | ADC valid: {int(report.valid)} | Calibrated bits: {report.calibrated} | Thruster age: {report.thruster_age_ms} ms")
             self.enable.setEnabled(self.enable.isEnabled() and not c.fault)
             self.start.setEnabled(self.start.isEnabled() and not c.fault and report.thruster_age_ms <= 500)
             self.send_thrust.setEnabled(self.send_thrust.isEnabled() and not c.fault)
             self.acquire_start.setEnabled(self.acquire_start.isEnabled() and not c.fault)
+        if c.hardware_status_lost:
+            for button in (self.enable, self.start, self.send_thrust, self.acquire_start):
+                button.setEnabled(False)
 
-        if c.hardware and c.fault:
+        if c.hardware_status_lost:
+            hint = "수신 지연으로 조작 차단: 데이터 수신은 유지합니다. 상태를 확인하고 Disconnect 후 다시 연결하세요."
+        elif c.hardware and c.fault:
             if c.hardware_report is not None and c.hardware_report.fault & 4:
                 hint = "Enable 차단: SD 오류. TMS의 SD 카드 장착·파일시스템·쓰기 상태를 확인한 뒤 Enter MEASUREMENT를 다시 누르세요."
             else:
@@ -544,12 +566,22 @@ class MainWindow(QMainWindow):
         self.update_state()
         self.sample_count.setText(f"Raw samples acquired: {len(c.calibration.samples)}")
         self.profile_marker.setValue(c.measurement.position)
-        channels = tuple(dict.fromkeys(channel for _, channel in self.live_curves))
+        raw_channels = {"motor_voltage": "raw_voltage", "motor_current": "raw_current",
+                        "load_cell": "raw_load_cell", "pressure": "raw_pressure"}
+        channels = tuple(dict.fromkeys([channel for _, channel in self.live_curves] + list(raw_channels.values())))
         times, values = c.visualization.snapshot(channels)
+        if c.hardware and times.size:
+            times = times - times[0]
+        raw_display = set()
+        if c.hardware and c.hardware_report is not None:
+            flags = c.hardware_report.calibrated
+            raw_display = {name for name in raw_channels if not flags & (1 if name == "load_cell" else 2)}
         for curve, channel in self.live_curves:
-            curve.setData(times, values[channel])
+            curve.setData(times, values[raw_channels[channel] if channel in raw_display else channel])
         for plot, channel, label in self.live_plots:
-            plot.setTitle("Pressure (firmware unit TBD)" if c.hardware and channel == "pressure" else label)
+            plot.setLabel("bottom", "Receive time" if c.hardware else "TMS runtime", units="s")
+            plot.setTitle(f"{channel.replace('_', ' ').title()} · RAW ADC (counts)" if channel in raw_display else
+                          "Pressure (firmware unit TBD)" if c.hardware and channel == "pressure" else label)
 
     def closeEvent(self, event) -> None:
         self.controller.disconnect()

@@ -60,6 +60,7 @@ class TMSController(QObject):
         self.last_status_at = 0.0
         self.calibration_start_requested = False
         self.hardware_status_lost = False
+        self.processing_report = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(20)
@@ -253,6 +254,7 @@ class TMSController(QObject):
             return
         if packet.kind == PacketType.HARDWARE_REPORT:
             report = packet.value
+            previous_fault = self.fault
             self.hardware_report = report
             self.last_status_at = time.monotonic()
             self.fault = report.fault_text
@@ -261,10 +263,15 @@ class TMSController(QObject):
                 self.measurement.reset()
                 self.measurement.use_profile = False
                 self.calibration_start_requested = False
-            self._packet(Packet(PacketType.STATUS, report.status))
-            self._packet(Packet(PacketType.TELEMETRY, report.telemetry))
-            if report.fault:
+            self.processing_report = True
+            try:
+                self._packet(Packet(PacketType.STATUS, report.status))
+                self._packet(Packet(PacketType.TELEMETRY, report.telemetry))
+            finally:
+                self.processing_report = False
+            if report.fault and self.fault != previous_fault:
                 self._warn("TMS FAULT: " + self.fault)
+            self.changed.emit()
             return
         if packet.kind == PacketType.STATUS:
             self.state.connected = True
@@ -276,7 +283,7 @@ class TMSController(QObject):
             if not self.pending:
                 if self.stopping:
                     self._next_stop()
-                elif not self.fault:
+                elif not self.fault and not self.hardware_status_lost:
                     self.message = "CONNECTED / FEEDBACK CONFIRMED"
             if self.hardware and self.calibration_start_requested and not self.pending and not self.stopping:
                 self.calibration_start_requested = False
@@ -286,7 +293,8 @@ class TMSController(QObject):
                 self._warn("COMMAND / TMS STATE MISMATCH")
         elif packet.kind == PacketType.TELEMETRY:
             self.telemetry = packet.value
-            self.visualization.append(packet.value, self.state.status.thrust_command)
+            self.visualization.append(packet.value, self.state.status.thrust_command,
+                                      time.monotonic() if self.hardware else None)
             if self.state.status.acquire and math.isfinite(packet.value.raw_load_cell):
                 if len(self.calibration.samples) < self.settings.calibration_max_samples:
                     self.calibration.samples.append(packet.value.raw_load_cell)
@@ -306,23 +314,23 @@ class TMSController(QObject):
         elif packet.kind == PacketType.FAULT:
             self.fault = str(packet.value)
             self._warn("TMS FAULT: " + self.fault)
-        self.changed.emit()
+        if not self.processing_report:
+            self.changed.emit()
 
     def _tick(self) -> None:
         if self.reconnect_requested and not self.communication.thread.is_alive():
             self.connect_mock()
         now = time.monotonic()
-        if self.hardware and self.state.connected and not self.hardware_status_lost and now - self.last_status_at > self.settings.hardware_status_timeout_s:
+        received_at = max(self.last_status_at, self.communication.last_report_at)
+        if self.hardware and self.state.connected and not self.hardware_status_lost and now - received_at > self.settings.hardware_status_timeout_s:
             self.hardware_status_lost = True
             self._warn("TMS STATUS TIMEOUT / STOP REQUESTED, NOT CONFIRMED")
             if not self.stopping:
                 self.stop(emergency=True)
             return
         if self.hardware_status_lost and not self.stopping:
-            self.disconnect()
-            self.message = "TMS STATUS TIMEOUT / RECONNECT REQUIRED; VERIFY FIRMWARE STOP"
-            self.changed.emit()
-            return
+            # Keep receiving after a brief gap. Operation stays latched off until reconnect.
+            self.message = "TMS STATUS TIMEOUT / MONITORING ONLY; RECONNECT BEFORE OPERATING"
         expired = [token for token, item in self.pending.items() if now - (item.sent_at or item.queued_at) > self.settings.feedback_timeout_s]
         if expired:
             for token in expired:

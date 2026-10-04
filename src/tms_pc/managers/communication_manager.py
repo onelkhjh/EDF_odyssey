@@ -38,6 +38,9 @@ class CommunicationManager(QObject):
         self.lock = threading.Lock()
         self.generation = 0
         self.session = 0
+        self.last_bytes_at = 0.0
+        self.last_report_at = 0.0
+        self.rx_bytes = 0
 
     def connect_transport(self, transport: Transport, codec=None) -> None:
         if self.thread and self.thread.is_alive():
@@ -46,6 +49,9 @@ class CommunicationManager(QObject):
         self.codec = codec if codec is not None else MockCodec(self.settings.max_payload)
         self.transport = transport
         self.stop_event.clear()
+        self.last_bytes_at = 0.0
+        self.last_report_at = 0.0
+        self.rx_bytes = 0
         self.session += 1
         self.thread = threading.Thread(target=self._run, args=(self.session,), name="TMS-IO", daemon=True)
         self.thread.start()
@@ -78,6 +84,7 @@ class CommunicationManager(QObject):
             self.connection.emit(session, True, "CONNECTED — awaiting STATUS")
             last_rx = time.monotonic()
             last_heartbeat = 0.0
+            rx_timeout_reported = False
             while not self.stop_event.is_set():
                 try:
                     _, _, outgoing = self.queue.get_nowait()
@@ -92,14 +99,22 @@ class CommunicationManager(QObject):
                     transport.send(self.codec.encode(Packet(PacketType.HEARTBEAT, None)))
                     last_heartbeat = time.monotonic()
                 data = transport.read()
+                if data:
+                    self.last_bytes_at = time.monotonic()
+                    self.rx_bytes += len(data)
                 for packet in self.codec.feed(data):
                     if packet.kind in (PacketType.STATUS, PacketType.TELEMETRY, PacketType.FAULT, PacketType.HARDWARE_REPORT):
                         last_rx = time.monotonic()
+                        if packet.kind == PacketType.HARDWARE_REPORT:
+                            self.last_report_at = last_rx
+                        rx_timeout_reported = False
                         self.packet_received.emit(session, packet)
                 for error in self.codec.errors:
                     self.warning.emit(session, "Packet rejected: " + error)
                 if time.monotonic() - last_rx > self.settings.connection_timeout_s:
-                    raise ConnectionError("TMS CONNECTION LOST / THRUST COMMAND DISABLED")
+                    if not rx_timeout_reported:
+                        self.warning.emit(session, "TMS RX TIMEOUT / PORT OPEN, WAITING FOR DATA")
+                        rx_timeout_reported = True
                 self.stop_event.wait(self.settings.worker_period_s)
         except Exception as exc:
             log.exception("Communication error")
