@@ -239,11 +239,14 @@ class MainWindow(QMainWindow):
         self.stop = self.button(row, "Stop", self.controller.stop, True)
         self.emergency = self.button(row, "Emergency Stop Request", lambda: self.controller.stop(True), True)
         layout.addLayout(row)
+        self.throttle_hint = QLabel()
+        self.throttle_hint.setWordWrap(True)
+        layout.addWidget(self.throttle_hint)
         row = QHBoxLayout()
         self.constant = spin(0, 100, suffix=" %")
-        row.addWidget(QLabel("Constant Thrust"))
+        row.addWidget(QLabel("Throttle (%)"))
         row.addWidget(self.constant)
-        self.send_thrust = self.button(row, "Send Thrust Command", lambda: self.controller.request(PacketType.COMMAND_THRUST, self.constant.value()))
+        self.send_thrust = self.button(row, "Send Throttle Command", lambda: self.controller.request(PacketType.COMMAND_THRUST, self.constant.value()))
         self.profile_on = QCheckBox("Use CSV Profile")
         row.addWidget(self.profile_on)
         self.load_profile_button = self.button(row, "Load Profile CSV", self.load_profile)
@@ -501,6 +504,24 @@ class MainWindow(QMainWindow):
             self.start.setEnabled(self.start.isEnabled() and not c.fault and report.thruster_age_ms <= 500)
             self.send_thrust.setEnabled(self.send_thrust.isEnabled() and not c.fault)
             self.acquire_start.setEnabled(self.acquire_start.isEnabled() and not c.fault)
+
+        if c.hardware and c.fault:
+            if c.hardware_report is not None and c.hardware_report.fault & 4:
+                hint = "Enable 차단: SD 오류. TMS의 SD 카드 장착·파일시스템·쓰기 상태를 확인한 뒤 Enter MEASUREMENT를 다시 누르세요."
+            else:
+                hint = f"Enable 차단: {c.fault}. 장치 오류를 해결한 뒤 Enter MEASUREMENT로 복구를 요청하세요."
+        elif not linked:
+            hint = "TMS COM 포트를 연결하고 실제 상태 보고 수신을 기다리세요."
+        elif c.pending or c.stopping:
+            hint = "명령 처리 중: TMS 상태 응답을 기다리세요."
+        elif s.mode != Mode.MEASUREMENT:
+            hint = "Enter MEASUREMENT를 눌러 모드 전환을 확인한 뒤 Enable Thrust를 누르세요."
+        elif s.thrust_enable:
+            hint = "스로틀이 활성화되어 있습니다." + (" Start를 눌러 운전을 시작하세요." if not s.mode_run else " 스로틀 값을 입력하고 Send Throttle Command를 누르세요.")
+        else:
+            hint = "Enable Thrust를 누르면 추력기 전원이 활성화됩니다."
+        self.throttle_hint.setText(hint)
+        self.enable.setToolTip(hint)
 
     def refresh_live(self) -> None:
         c = self.controller

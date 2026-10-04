@@ -35,11 +35,13 @@ Mock 시뮬레이터에 자동 연결:
 .\.venv\Scripts\python.exe -m tms_pc.main --mock
 ```
 
-자동 연결 없이 GUI 실행:
+GUI 실행 (`Run_TMS.cmd`를 더블클릭해도 됩니다):
 
 ```powershell
 .\.venv\Scripts\python.exe -m tms_pc.main
 ```
+
+`Refresh COM`으로 모든 COM 포트를 표시하고, 사용할 포트와 Baud를 선택한 뒤 `Connect`를 누릅니다. 실제 장비에는 자동 연결하지 않습니다.
 
 설치된 CLI 진입점도 사용할 수 있습니다.
 
@@ -51,7 +53,9 @@ Mock 시뮬레이터에 자동 연결:
 
 ### 실제 TMS 연결
 
-GUI 실행 후 TMS USB VCP COM 포트를 선택하고 양의 정수 Baud를 입력한 뒤 Connect를 누릅니다. Baud 입력은 현재 GUI/pySerial 설정이며 USB CDC 전송률을 정하지 않습니다. 추력기 UART의 2Mbps는 PC 링크 설정이 아닙니다.
+TMS USB VCP COM 포트를 선택하고 양의 정수 Baud를 입력한 뒤 `Connect`를 누릅니다. Baud 목록에는 `2000000`도 포함됩니다. Baud는 GUI/pySerial 설정이며 USB CDC 전송률을 정하지 않습니다. 추력기 UART의 2Mbps는 PC 링크 설정이 아닙니다.
+
+Measurement 화면에 Enable 차단 원인이 표시됩니다. `SD` 오류는 카드 장착·파일시스템·쓰기 상태를 확인하고, 장치 오류를 해결한 뒤 `Enter MEASUREMENT`로 복구를 요청하세요. `Fault: NONE`과 모드 전환을 확인한 뒤 Enable 및 Start를 진행합니다.
 
 PC는 136바이트 TMS report를 받아 상태, RAW 및 보정된 센서 값을 표시하며 worker에서 100ms 간격으로 Heartbeat를 전송합니다. 미보정 값은 N/A이며, 최신 추력기 보고의 battery_percent는 Thruster Battery (%)로 표시합니다. Start는 Enable Feedback과 500ms 이내 추력기 보고가 필요합니다. Stop은 펌웨어 ID 8을 사용해 Standby로 전환합니다.
 
@@ -74,7 +78,7 @@ checksum·counter·runtime을 검증하고 미기록 tail을 제외합니다. �
 1. Mock으로 실행하고 연결 상태와 센서 값이 갱신되는지 확인합니다.
 2. Measurement 화면에서 Measurement 모드 진입을 요청하고 Feedback을 기다립니다.
 3. `Enable Thrust`를 누른 뒤 `Start`를 누릅니다. 모드 진입, Enable, Start는 각각 별도 동작입니다.
-4. `Constant Thrust`에 0~100% 값을 입력하고 `Send Thrust Command`를 누릅니다. 명령은 Start Feedback 이후 적용합니다.
+4. `Throttle (%)`에 0~100% 스로틀 값을 입력하고 `Send Throttle Command`를 누릅니다. 명령은 Start Feedback 이후 적용합니다.
 5. 종료 시 `Stop`을 누르고 상태를 확인한 뒤 Standby 모드로 전환합니다.
 
 ### CSV Profile 시험

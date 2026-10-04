@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 # UI suggestions only: no firmware baud is selected implicitly.
-BAUD_RATE_OPTIONS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600)
+BAUD_RATE_OPTIONS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 2000000)
 
 
 @dataclass(frozen=True)
