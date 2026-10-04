@@ -7,12 +7,14 @@ class VisualizationManager:
     def __init__(self, max_samples: int) -> None:
         self.samples: deque[tuple[Telemetry, float]] = deque(maxlen=max_samples)
         self.plot_times: deque[float] = deque(maxlen=max_samples)
+        self.revision = 0
 
     def append(self, telemetry: Telemetry, command: float, plot_time: float | None = None) -> None:
         if not self.samples:
             self.plot_times.clear()
         self.samples.append((telemetry, command))
         self.plot_times.append(telemetry.runtime if plot_time is None else plot_time)
+        self.revision += 1
 
     def channel(self, name: str) -> tuple[list[float], list[float]]:
         return ([t.runtime for t, _ in self.samples], [c if name == "thrust_command" else getattr(t, name) for t, c in self.samples])

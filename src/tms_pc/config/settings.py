@@ -13,7 +13,7 @@ class Settings:
     mock_period_s: float = 0.05
     mock_command_refresh_s: float = 0.5
     calibration_max_samples: int = 10000
-    gui_period_ms: int = 50
+    gui_period_ms: int = 100
     worker_period_s: float = 0.01
     serial_read_timeout_s: float = 0.02
     serial_write_timeout_s: float = 0.2

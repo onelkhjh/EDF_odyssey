@@ -12,6 +12,7 @@ from tms_pc.managers.communication_manager import CommunicationManager
 from tms_pc.managers.state_manager import StateManager
 from tms_pc.managers.calibration_manager import CalibrationManager
 from tms_pc.managers.measurement_manager import MeasurementManager
+from tms_pc.managers.measurement_recorder import MeasurementRecorder
 from tms_pc.managers.visualization_manager import VisualizationManager
 from tms_pc.models.enums import Mode, PacketType
 from tms_pc.models.telemetry import Telemetry
@@ -37,6 +38,7 @@ class TMSController(QObject):
         self.state = StateManager()
         self.calibration = CalibrationManager()
         self.measurement = MeasurementManager()
+        self.recorder = MeasurementRecorder()
         self.visualization = VisualizationManager(settings.buffer_samples)
         self.communication = CommunicationManager(settings)
         self.communication.packet_received.connect(self._session_packet, Qt.ConnectionType.QueuedConnection)
@@ -46,6 +48,8 @@ class TMSController(QObject):
         self.telemetry: Telemetry | None = None
         self.pending: dict[int, Expectation] = {}
         self.commanded = 0.0
+        self.throttle_tx = "Throttle TX: no command sent"
+        self.throttle_tokens = {}
         self.message = "DISCONNECTED"
         self.fault = ""
         self.stop_steps: list[Packet] = []
@@ -59,6 +63,8 @@ class TMSController(QObject):
         self.hardware_report = None
         self.last_status_at = 0.0
         self.calibration_start_requested = False
+        self.calibration_stop_requested = False
+        self.calibration_exit_mode = None
         self.hardware_status_lost = False
         self.processing_report = False
         self.timer = QTimer(self)
@@ -109,6 +115,8 @@ class TMSController(QObject):
             self._warn(message)
 
     def connect_serial(self, port: str, baud: int) -> None:
+        self.calibration_stop_requested = False
+        self.calibration_exit_mode = None
         if self.communication.thread and self.communication.thread.is_alive():
             raise ValueError("Disconnect first")
         if not 0 < self.settings.hardware_heartbeat_s < 0.5:
@@ -143,6 +151,7 @@ class TMSController(QObject):
     def _connection(self, connected: bool, message: str) -> None:
         # Transport connect is not valid STATUS feedback.
         if not connected:
+            self.recorder.finish()
             self.accept_packets = False
             self.state.connected = False
             self.pending.clear()
@@ -160,6 +169,11 @@ class TMSController(QObject):
         self.changed.emit()
 
     def _sent(self, token: int, sent_at: float) -> None:
+        if token in self.throttle_tokens:
+            value = self.throttle_tokens.pop(token)
+            self.throttle_tx = f"Throttle {value:.2f}%: COM WRITE COMPLETE / check TMS Applied"
+            log.info(self.throttle_tx)
+            self.changed.emit()
         if token in self.pending:
             self.pending[token].sent_at = sent_at
 
@@ -182,8 +196,50 @@ class TMSController(QObject):
                 self._send(Packet(PacketType.COMMAND_MODE_RUN, True))
                 return
         if kind == PacketType.COMMAND_MODE_RUN and value:
+            if self.state.status.mode == Mode.MEASUREMENT:
+                self.recorder.begin(self.hardware)
             self.measurement.reset()
         self._send(Packet(kind, value))
+
+    def stop_acquire(self) -> None:
+        if self.hardware and self.state.status.mode == Mode.CALIBRATION and not self.state.status.acquire:
+            self.request(PacketType.COMMAND_MODE_RUN, False)
+            return
+        self.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, False)
+        self.calibration_stop_requested = self.hardware
+
+    def change_mode(self, mode: Mode) -> None:
+        status = self.state.status
+        if self.hardware and status.mode == Mode.CALIBRATION and (status.mode_run or status.acquire) and mode != Mode.SAFE:
+            if mode == Mode.BOOT:
+                raise ValueError("BOOT cannot be requested")
+            self.stop_acquire()
+            self.calibration_exit_mode = mode
+            return
+        self.request(PacketType.COMMAND_MODE, mode)
+
+    def send_throttle(self, value: float) -> None:
+        value = float(value)
+        if not math.isfinite(value) or not 0 <= value <= 100:
+            raise ValueError("Throttle must be finite and 0..100%")
+        if not self.hardware:
+            self.request(PacketType.COMMAND_THRUST, value)
+            return
+        if not self.state.connected or self.stopping or self.hardware_status_lost:
+            raise ValueError("Connect and recover the TMS link before sending throttle")
+        if self.pending:
+            raise ValueError("Wait for the current command feedback before sending throttle")
+        status = self.state.status
+        if status.mode == Mode.MEASUREMENT and status.mode_run and status.thrust_enable and not self.fault:
+            self.request(PacketType.COMMAND_THRUST, value)
+            return
+        # An explicit transmission probe does not Enable, Start, or claim application.
+        token = self.communication.submit(Packet(PacketType.COMMAND_THRUST, value))
+        self.throttle_tokens[token] = value
+        self.throttle_tx = f"Throttle {value:.2f}%: QUEUED / APPLICATION UNCONFIRMED"
+        self.message = f"Throttle {value:.2f}% TX REQUESTED / APPLICATION UNCONFIRMED; firmware requires Enable + Start"
+        log.info(self.message)
+        self.changed.emit()
 
     def _send(self, packet: Packet, priority: int = 10) -> None:
         mapping = {
@@ -194,6 +250,8 @@ class TMSController(QObject):
         token = self.communication.submit(packet, priority)
         self.pending[token] = Expectation(mapping[packet.kind], packet.value, time.monotonic())
         if packet.kind == PacketType.COMMAND_THRUST:
+            self.throttle_tokens[token] = float(packet.value)
+            self.throttle_tx = f"Throttle {float(packet.value):.2f}%: QUEUED"
             self.commanded = float(packet.value)
             self.last_thrust_sent = time.monotonic()
         self.changed.emit()
@@ -208,6 +266,8 @@ class TMSController(QObject):
         self.emergency = emergency
         self.calibration_start_requested = False
         self.stop_steps = []
+        self.calibration_stop_requested = False
+        self.calibration_exit_mode = None
         if self.hardware:
             # Firmware id=8 atomically zeros/disables/stops and enters Standby.
             # SAFE mode command performs the same shutdown and enters Safe.
@@ -289,10 +349,23 @@ class TMSController(QObject):
                 self.calibration_start_requested = False
                 if self.state.status.mode == Mode.CALIBRATION and self.state.status.mode_run and not self.fault:
                     self.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, True)
+            if self.calibration_stop_requested and not self.pending and not self.stopping:
+                self.calibration_stop_requested = False
+                if self.hardware and self.state.status.mode == Mode.CALIBRATION and not self.state.status.acquire and self.state.status.mode_run and not self.fault:
+                    self.request(PacketType.COMMAND_MODE_RUN, False)
+            if self.calibration_exit_mode is not None and not self.pending and not self.stopping:
+                status = self.state.status
+                if not status.mode_run and not status.acquire and not status.thrust_enable:
+                    target = self.calibration_exit_mode
+                    self.calibration_exit_mode = None
+                    self.request(PacketType.COMMAND_MODE, target)
             if self.state.status.mode_run and not self.stopping and not self.pending and abs(self.commanded - self.state.status.thrust_command) > self.settings.thrust_tolerance:
                 self._warn("COMMAND / TMS STATE MISMATCH")
         elif packet.kind == PacketType.TELEMETRY:
             self.telemetry = packet.value
+            self.recorder.append(packet.value, self.state.status, self.commanded, self.fault)
+            if self.recorder.stream is not None and not self.pending and not self.state.status.mode_run:
+                self.recorder.finish()
             self.visualization.append(packet.value, self.state.status.thrust_command,
                                       time.monotonic() if self.hardware else None)
             if self.state.status.acquire and math.isfinite(packet.value.raw_load_cell):
@@ -350,6 +423,11 @@ class TMSController(QObject):
             self.request(PacketType.COMMAND_THRUST, self.commanded)
 
     def disconnect(self) -> None:
+        self.recorder.finish()
+        self.throttle_tokens.clear()
+        self.throttle_tx = "Throttle TX: disconnected"
+        self.calibration_stop_requested = False
+        self.calibration_exit_mode = None
         self.reconnect_requested = False
         self.accept_packets = False
         self.communication.disconnect()

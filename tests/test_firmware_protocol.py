@@ -116,6 +116,20 @@ def test_fault_blocks_thrust_and_stop_uses_firmware_atomic_command(app):
     assert not c.pending and not c.stopping
 
 
+@pytest.mark.parametrize("fault", [4, 16])
+def test_explicit_throttle_probe_without_enable_does_not_start(app, fault):
+    c = hardware_controller()
+    data = bytearray(report_payload(mode=0, running=0, enable=0, fault=fault))
+    struct.pack_into("<I", data, 56, 0xFFFFFFFF)
+    c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(bytes(data))))
+    c.send_throttle(10)
+    outgoing = c.communication.queue.get_nowait()[2]
+    assert outgoing.packet == Packet(PacketType.COMMAND_THRUST, 10)
+    assert c.communication.queue.empty() and not c.pending
+    assert not c.state.status.thrust_enable and not c.state.status.mode_run
+    assert "APPLICATION UNCONFIRMED" in c.message
+
+
 def test_calibration_requires_run_and_never_fabricates_factor_feedback(app):
     c = hardware_controller()
     c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(report_payload(mode=3, running=0, enable=0))))
@@ -127,6 +141,25 @@ def test_calibration_requires_run_and_never_fabricates_factor_feedback(app):
     c._sent(outgoing.token, time.monotonic())
     c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(report_payload(mode=3, running=1, enable=0))))
     assert c.communication.queue.get_nowait()[2].packet == Packet(PacketType.COMMAND_CALIBRATION_ACQUIRE, True)
+
+
+def test_acquire_stop_also_stops_calibration_run(app):
+    c = hardware_controller()
+    data = bytearray(report_payload(mode=3, running=1, enable=0))
+    data[2] = 1
+    c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(bytes(data))))
+    c.stop_acquire()
+    outgoing = c.communication.queue.get_nowait()[2]
+    assert outgoing.packet == Packet(PacketType.COMMAND_CALIBRATION_ACQUIRE, False)
+    c._sent(outgoing.token, time.monotonic())
+    data[2] = 0
+    c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(bytes(data))))
+    outgoing = c.communication.queue.get_nowait()[2]
+    assert outgoing.packet == Packet(PacketType.COMMAND_MODE_RUN, False)
+    c._sent(outgoing.token, time.monotonic())
+    data[1] = 0
+    c._packet(Packet(PacketType.HARDWARE_REPORT, decode_report(bytes(data))))
+    c.request(PacketType.COMMAND_MODE, Mode.STANDBY)
 
 
 def test_worker_sends_real_heartbeat_and_delivers_report(app):

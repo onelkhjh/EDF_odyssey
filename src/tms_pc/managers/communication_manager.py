@@ -93,7 +93,11 @@ class CommunicationManager(QObject):
                 if outgoing is not None:
                     with self.lock:
                         if not self.stop_event.is_set() and outgoing.generation == self.generation:
-                            transport.send(self.codec.encode(outgoing.packet))
+                            encoded = self.codec.encode(outgoing.packet)
+                            transport.send(encoded)
+                            if outgoing.packet.kind == PacketType.COMMAND_THRUST:
+                                log.info("THROTTLE COM WRITE COMPLETE: token=%s value=%s bytes=%s hex=%s",
+                                         outgoing.token, outgoing.packet.value, len(encoded), encoded.hex(" "))
                             self.sent.emit(session, outgoing.token, time.monotonic())
                 if hasattr(self.codec, "ids") and time.monotonic() - last_heartbeat >= self.settings.hardware_heartbeat_s:
                     transport.send(self.codec.encode(Packet(PacketType.HEARTBEAT, None)))

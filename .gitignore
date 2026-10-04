@@ -7,4 +7,5 @@ dist/
 *.spec
 logs/
 exports/
+recordings/
 artifacts/

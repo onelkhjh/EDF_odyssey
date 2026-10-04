@@ -15,6 +15,7 @@ from tms_pc.managers.analysis_manager import AnalysisManager, AnalysisResult, an
 
 CHANNELS = {"Voltage (V)": "motor_voltage", "Current (A)": "motor_current", "Thrust (N)": "load_cell", "Pressure (kPa)": "pressure", "Command (%)": "thrust_command", "Power (W)": "power_w"}
 COLORS = ["#2563eb", "#059669", "#dc2626", "#9333ea", "#d97706", "#0891b2"]
+NEWTONS_PER_KGF = 9.80665
 
 
 def spin(minimum: float, maximum: float, value: float = 0, suffix: str = "") -> QDoubleSpinBox:
@@ -30,9 +31,9 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: TMSController, mock: bool = False) -> None:
         super().__init__()
         self.controller = controller
-        self.setWindowTitle("TMS-PC · EDF Thrust Measurement System")
+        self.setWindowTitle("TMS-PC · Throttle TX Monitor · EDF Thrust Measurement System")
         self.resize(1320, 900)
-        pg.setConfigOptions(background="w", foreground="#334155", antialias=True)
+        pg.setConfigOptions(background="w", foreground="#334155", antialias=False)
         self.setStyleSheet("QWidget { background: white; color: #172033; font-size: 13px; } QPushButton { background: #eef4ff; border: 1px solid #cbd5e1; padding: 8px; border-radius: 4px; } QPushButton:disabled { color: #94a3b8; background: #f8fafc; } QLineEdit,QDoubleSpinBox,QComboBox { border: 1px solid #cbd5e1; padding: 5px; } QListWidget::item { padding: 16px; } QListWidget::item:selected { background: #dbeafe; color: #1d4ed8; }")
         root = QWidget()
         self.setCentralWidget(root)
@@ -78,6 +79,8 @@ class MainWindow(QMainWindow):
         navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.mode_buttons: dict[Mode, QPushButton] = {}
         self.live_curves: list[tuple[object, str]] = []
+        self.last_plot_key = None
+        self.plot_metadata = {}
         self.standby_page()
         self.calibration_page()
         self.measurement_page()
@@ -127,7 +130,7 @@ class MainWindow(QMainWindow):
         label.setStyleSheet("font-size: 20px; font-weight: 600;")
         row.addWidget(label, 1)
         if mode:
-            self.mode_buttons[mode] = self.button(row, "Enter " + mode.name, lambda: self.controller.request(PacketType.COMMAND_MODE, mode))
+            self.mode_buttons[mode] = self.button(row, "Enter " + mode.name, lambda: self.controller.change_mode(mode))
         layout.addLayout(row)
         self.pages.addWidget(widget)
         return layout
@@ -163,17 +166,17 @@ class MainWindow(QMainWindow):
         layout = self.page("Load Cell Calibration", Mode.CALIBRATION)
         row = QHBoxLayout()
         row.addWidget(QLabel("Reference Load"))
-        self.reference = spin(-1e6, 1e6, suffix=" N")
+        self.reference = spin(-1e6, 1e6, suffix=" kgf")
         row.addWidget(self.reference)
         self.acquire_start = self.button(row, "Acquire Start", self.start_acquire)
-        self.acquire_stop = self.button(row, "Acquire Stop", lambda: self.controller.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, False))
+        self.acquire_stop = self.button(row, "Acquire Stop", self.controller.stop_acquire)
         self.add_point = self.button(row, "Add Point", self.add_calibration_point)
         layout.addLayout(row)
         layout.addWidget(QLabel("Mock acquisition uses this reference as a simulated applied load. Actual TMS must stream RAW values."))
         self.sample_count = QLabel("Samples: 0")
         layout.addWidget(self.sample_count)
         self.calibration_table = QTableWidget(0, 4)
-        self.calibration_table.setHorizontalHeaderLabels(["Reference N", "Samples", "Raw Mean", "Raw STD"])
+        self.calibration_table.setHorizontalHeaderLabels(["Reference kgf", "Samples", "Raw Mean", "Raw STD"])
         layout.addWidget(self.calibration_table)
         row = QHBoxLayout()
         self.button(row, "Calculate Regression", self.calculate_calibration)
@@ -183,7 +186,7 @@ class MainWindow(QMainWindow):
         self.calibration_result = QLabel("a / b / Scale Factor / R²: N/A")
         layout.addWidget(self.calibration_result)
         self.cal_plot = pg.PlotWidget(title="Raw = a × Reference Force + b")
-        self.cal_plot.setLabel("bottom", "Reference", units="N")
+        self.cal_plot.setLabel("bottom", "Reference", units="kgf")
         self.cal_plot.setLabel("left", "Raw counts")
         layout.addWidget(self.cal_plot, 1)
         self.factors = None
@@ -191,9 +194,9 @@ class MainWindow(QMainWindow):
     def start_acquire(self) -> None:
         self.controller.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, True)
         self.controller.calibration.samples.clear()
-        self.controller.calibration.reference_n = self.reference.value()
+        self.controller.calibration.reference_n = self.reference.value() * NEWTONS_PER_KGF
         if self.controller.transport:
-            self.controller.transport.reference_n = self.reference.value()
+            self.controller.transport.reference_n = self.reference.value() * NEWTONS_PER_KGF
 
     def add_calibration_point(self) -> None:
         if self.controller.state.status.acquire or self.controller.pending:
@@ -201,21 +204,21 @@ class MainWindow(QMainWindow):
         p = self.controller.calibration.add_point()
         row = self.calibration_table.rowCount()
         self.calibration_table.insertRow(row)
-        for column, value in enumerate((p.reference_n, p.samples, p.raw_mean, p.raw_std)):
+        for column, value in enumerate((p.reference_n / NEWTONS_PER_KGF, p.samples, p.raw_mean, p.raw_std)):
             self.calibration_table.setItem(row, column, QTableWidgetItem(f"{value:.6g}"))
         self.factors = None
 
     def calculate_calibration(self) -> None:
         self.factors = self.controller.calibration.fit()
         r = self.factors
-        self.calibration_result.setText(f"Slope a={r.slope:.6g} raw/N   Zero Offset b={r.offset:.6g} raw   Scale Factor={r.scale_factor:.6g} N/raw   R²={r.r_squared:.8f}")
+        self.calibration_result.setText(f"Slope a={r.slope * NEWTONS_PER_KGF:.6g} raw/kgf   Zero Offset b={r.offset:.6g} raw   Conversion={r.scale_factor / NEWTONS_PER_KGF:.6g} kgf/raw   R²={r.r_squared:.8f}")
         points = self.controller.calibration.points
-        x = np.array([p.reference_n for p in points])
+        x = np.array([p.reference_n / NEWTONS_PER_KGF for p in points])
         y = np.array([p.raw_mean for p in points])
         self.cal_plot.clear()
         self.cal_plot.plot(x, y, pen=None, symbol="o", symbolBrush="#2563eb")
         xx = np.array([x.min(), x.max()])
-        self.cal_plot.plot(xx, xx * r.slope + r.offset, pen="#dc2626")
+        self.cal_plot.plot(xx, xx * r.slope * NEWTONS_PER_KGF + r.offset, pen="#dc2626")
         self.update_state()
 
     def apply_factors(self) -> None:
@@ -237,6 +240,9 @@ class MainWindow(QMainWindow):
         layout = self.page("Measurement · Separate Enable / Start", Mode.MEASUREMENT)
         self.measurement_label = QLabel()
         layout.addWidget(self.measurement_label)
+        self.recording_label = QLabel("Measurement CSV and thrust/time graph are saved automatically to recordings/")
+        self.recording_label.setWordWrap(True)
+        layout.addWidget(self.recording_label)
         row = QHBoxLayout()
         self.enable = self.button(row, "Enable Thrust", lambda: self.controller.request(PacketType.COMMAND_THRUST_ENABLE, True))
         self.disable = self.button(row, "Disable Thrust", self.controller.stop, True)
@@ -247,11 +253,14 @@ class MainWindow(QMainWindow):
         self.throttle_hint = QLabel()
         self.throttle_hint.setWordWrap(True)
         layout.addWidget(self.throttle_hint)
+        self.throttle_tx_label = QLabel()
+        self.throttle_tx_label.setWordWrap(True)
+        layout.addWidget(self.throttle_tx_label)
         row = QHBoxLayout()
         self.constant = spin(0, 100, suffix=" %")
         row.addWidget(QLabel("Throttle (%)"))
         row.addWidget(self.constant)
-        self.send_thrust = self.button(row, "Send Throttle Command", lambda: self.controller.request(PacketType.COMMAND_THRUST, self.constant.value()))
+        self.send_thrust = self.button(row, "Send Throttle Command", lambda: self.controller.send_throttle(self.constant.value()))
         self.profile_on = QCheckBox("Use CSV Profile")
         row.addWidget(self.profile_on)
         self.load_profile_button = self.button(row, "Load Profile CSV", self.load_profile)
@@ -477,6 +486,8 @@ class MainWindow(QMainWindow):
 
     def update_state(self) -> None:
         c, s = self.controller, self.controller.state.status
+        if c.recorder.path is not None:
+            self.recording_label.setText(f"{'Recording' if c.recorder.stream is not None else 'Saved'}: {c.recorder.path.parent.resolve()} | measurement.csv / thrust_time.svg")
         linked = c.state.connected
         ready = linked and not c.pending and not c.stopping
         worker_active = bool(c.communication.thread and c.communication.thread.is_alive())
@@ -487,17 +498,21 @@ class MainWindow(QMainWindow):
         self.link.setText("CONNECTED" if linked else "DISCONNECTED / LOST")
         self.status.setText(f"TMS Mode: {s.mode.name} | Mode Run: {s.mode_run} | Thrust Enable: {s.thrust_enable} | Communication: {c.message} | Fault: {c.fault or 'NONE'}")
         self.measurement_label.setText(f"Measurement State: {c.state.measurement.name} | PC Commanded: {c.commanded:.2f}% | TMS Applied: {s.thrust_command:.2f}%")
+        self.throttle_tx_label.setText(c.throttle_tx)
         for mode, button in self.mode_buttons.items():
-            button.setEnabled(ready and not s.mode_run and not s.thrust_enable and not s.acquire)
+            button.setEnabled(ready and not s.thrust_enable and
+                              ((c.hardware and s.mode == Mode.CALIBRATION) or (not s.mode_run and not s.acquire)))
         self.enable.setEnabled(ready and s.mode == Mode.MEASUREMENT and not s.mode_run and not s.thrust_enable and c.state.measurement != MeasurementState.FINISHED)
         self.start.setEnabled(ready and c.state.measurement == MeasurementState.READY)
+        self.enable.setText("Thrust ENABLED" if linked and s.thrust_enable else "Enable Thrust")
         for button in (self.disable, self.stop, self.emergency):
             button.setEnabled(linked and not c.stopping)
-        self.send_thrust.setEnabled(ready and c.state.measurement == MeasurementState.RUNNING and not c.measurement.use_profile)
+        self.send_thrust.setEnabled(ready and (c.hardware or c.state.measurement == MeasurementState.RUNNING) and not c.measurement.use_profile)
+        self.send_thrust.setToolTip("추력기 전원·보고 없이도 TMS에 스로틀 명령을 전송합니다. EDF 적용은 펌웨어의 Enable + Start 조건에 따릅니다.")
         self.load_profile_button.setEnabled(not s.mode_run)
         self.profile_on.setEnabled(not s.mode_run)
         self.acquire_start.setEnabled(ready and s.mode == Mode.CALIBRATION and not s.acquire)
-        self.acquire_stop.setEnabled(ready and s.acquire)
+        self.acquire_stop.setEnabled(ready and (s.acquire or (c.hardware and s.mode == Mode.CALIBRATION and s.mode_run)))
         self.add_point.setEnabled(ready and s.mode == Mode.CALIBRATION and not s.acquire and bool(c.calibration.samples))
         self.apply_calibration.setEnabled(ready and not c.hardware and s.mode == Mode.CALIBRATION and not s.acquire and self.factors is not None)
         self.loss_button.setEnabled(linked and c.transport is not None)
@@ -519,9 +534,10 @@ class MainWindow(QMainWindow):
             self.status.setText(self.status.text() + f" | ADC valid: {int(report.valid)} | Calibrated bits: {report.calibrated} | Thruster age: {report.thruster_age_ms} ms")
             self.enable.setEnabled(self.enable.isEnabled() and not c.fault)
             self.start.setEnabled(self.start.isEnabled() and not c.fault and report.thruster_age_ms <= 500)
-            self.send_thrust.setEnabled(self.send_thrust.isEnabled() and not c.fault)
             self.acquire_start.setEnabled(self.acquire_start.isEnabled() and not c.fault)
-        if c.hardware_status_lost:
+        hardware_stale = c.hardware and (c.hardware_report is None or
+                         time.monotonic() - c.last_status_at > c.settings.hardware_status_timeout_s)
+        if c.hardware_status_lost or hardware_stale:
             for button in (self.enable, self.start, self.send_thrust, self.acquire_start):
                 button.setEnabled(False)
 
@@ -534,6 +550,8 @@ class MainWindow(QMainWindow):
                 hint = f"Enable 차단: {c.fault}. 장치 오류를 해결한 뒤 Enter MEASUREMENT로 복구를 요청하세요."
         elif not linked:
             hint = "TMS COM 포트를 연결하고 실제 상태 보고 수신을 기다리세요."
+        elif hardware_stale:
+            hint = "TMS의 최신 상태 보고를 기다리는 중입니다. Enable은 정상 상태 확인 후 활성화됩니다."
         elif c.pending or c.stopping:
             hint = "명령 처리 중: TMS 상태 응답을 기다리세요."
         elif s.mode != Mode.MEASUREMENT:
@@ -552,7 +570,7 @@ class MainWindow(QMainWindow):
             def value(number):
                 return f"{number:.3f}" if np.isfinite(number) else "N/A"
             pressure_unit = "(firmware unit TBD)" if c.hardware else "kPa"
-            text = f"Runtime {t.runtime:.3f} s   |   Voltage {value(t.motor_voltage)} V   |   Current {value(t.motor_current)} A   |   Measured Thrust {value(t.load_cell)} N   |   Pressure {value(t.pressure)} {pressure_unit}"
+            text = f"Runtime {t.runtime:.3f} s   |   Voltage {value(t.motor_voltage)} V   |   Current {value(t.motor_current)} A   |   Measured Thrust {value(t.load_cell / NEWTONS_PER_KGF)} kgf   |   Pressure {value(t.pressure)} {pressure_unit}"
             if c.hardware and c.hardware_report is not None:
                 report = c.hardware_report
                 battery = report.thruster.battery_percent if report.thruster_age_ms <= 500 else np.nan
@@ -560,7 +578,7 @@ class MainWindow(QMainWindow):
             self.sensor_label.setText(text)
             self.measure_sensor.setText(text)
         else:
-            text = "Voltage: N/A V | Current: N/A A | Thrust: N/A N | Pressure: N/A kPa — no live telemetry"
+            text = "Voltage: N/A V | Current: N/A A | Thrust: N/A kgf | Pressure: N/A kPa — no live telemetry"
             self.sensor_label.setText(text)
             self.measure_sensor.setText(text)
         self.update_state()
@@ -568,20 +586,35 @@ class MainWindow(QMainWindow):
         self.profile_marker.setValue(c.measurement.position)
         raw_channels = {"motor_voltage": "raw_voltage", "motor_current": "raw_current",
                         "load_cell": "raw_load_cell", "pressure": "raw_pressure"}
-        channels = tuple(dict.fromkeys([channel for _, channel in self.live_curves] + list(raw_channels.values())))
-        times, values = c.visualization.snapshot(channels)
-        if c.hardware and times.size:
-            times = times - times[0]
         raw_display = set()
         if c.hardware and c.hardware_report is not None:
             flags = c.hardware_report.calibrated
             raw_display = {name for name in raw_channels if not flags & (1 if name == "load_cell" else 2)}
-        for curve, channel in self.live_curves:
-            curve.setData(times, values[raw_channels[channel] if channel in raw_display else channel])
-        for plot, channel, label in self.live_plots:
-            plot.setLabel("bottom", "Receive time" if c.hardware else "TMS runtime", units="s")
-            plot.setTitle(f"{channel.replace('_', ' ').title()} · RAW ADC (counts)" if channel in raw_display else
-                          "Pressure (firmware unit TBD)" if c.hardware and channel == "pressure" else label)
+        visible = [(curve, channel, plot, label) for (curve, channel), (plot, _, label)
+                   in zip(self.live_curves, self.live_plots) if plot.isVisible()]
+        key = (c.visualization.revision, bool(c.visualization.samples), c.hardware,
+               frozenset(raw_display), self.pages.currentIndex())
+        if key == self.last_plot_key:
+            return
+        self.last_plot_key = key
+        channels = tuple(dict.fromkeys(raw_channels[channel] if channel in raw_display else channel
+                                       for _, channel, _, _ in visible))
+        times, values = c.visualization.snapshot(channels)
+        if c.hardware and times.size:
+            times = times - times[0]
+        for curve, channel, plot, label in visible:
+            plotted = values[raw_channels[channel] if channel in raw_display else channel]
+            if channel == "load_cell" and channel not in raw_display:
+                plotted = plotted / NEWTONS_PER_KGF
+            curve.setData(times, plotted)
+            title = (f"{channel.replace('_', ' ').title()} · RAW ADC (counts)" if channel in raw_display else
+                     "Pressure (firmware unit TBD)" if c.hardware and channel == "pressure" else
+                     "Thrust (kgf)" if channel == "load_cell" else label)
+            metadata = (title, c.hardware)
+            if self.plot_metadata.get(plot) != metadata:
+                plot.setLabel("bottom", "Receive time" if c.hardware else "TMS runtime", units="s")
+                plot.setTitle(title)
+                self.plot_metadata[plot] = metadata
 
     def closeEvent(self, event) -> None:
         self.controller.disconnect()
