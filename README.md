@@ -1,8 +1,8 @@
-﻿# TMS-PC
+# TMS-PC
 
 EDF(Electric Ducted Fan) 추력 측정 시스템의 PC 운용 및 CSV 분석 프로그램입니다. PySide6 GUI에서 센서 데이터를 확인하고 로드셀 보정, 추력 시험, 데이터 분석과 비교를 수행합니다.
 
-현재는 **Mock 시뮬레이터 기반 초기 구현**입니다. 실제 펌웨어 규격이 미확정이므로 실제 Serial 연결은 오류로 차단됩니다. Mock 프레임은 실제 장비 규격이 아닙니다.
+Mock 시뮬레이터와 **TMS 펌웨어 USB VCP 연결**을 지원합니다. 펌웨어 규격은 [11_Rocket-Avionics-System의 추력 측정 보드](https://github.com/JseoPark/11_Rocket-Avionics-System/tree/bd60824d97615e68efa217bd90a9705edf5408e5/Rocket%20Avionics%20System%20-%20Thrust%20Measurement%20Board)에 맞췄습니다. 실제 장비 통합 검증은 아직 수행하지 않았습니다.
 
 ## 주요 기능
 
@@ -12,7 +12,7 @@ EDF(Electric Ducted Fan) 추력 측정 시스템의 PC 운용 및 CSV 분석 프
 - 고정 추력 명령 및 CSV Profile 시험
 - CSV 검증, 구간 통계, 전력·에너지·동응답 분석과 파일 비교
 - 처리 데이터·분석 결과 CSV 및 그래프 PNG 내보내기
-- 별도 HardwareReport 모델과 64바이트 report_t payload 디코더
+- 별도 HardwareReport 모델과 72바이트 report_t payload 디코더
 
 시뮬레이터는 실제 EDF 성능 모델이 아닙니다. PC는 안전 시스템이 아니며, 통신 상실 시 최종 모터 정지와 안전 모드 전환은 독립적인 TMS Firmware가 수행해야 합니다.
 
@@ -48,6 +48,24 @@ Mock 시뮬레이터에 자동 연결:
 ```
 
 로그는 실행한 작업 디렉터리의 `logs/tms_pc.log`에 기록됩니다.
+
+### 실제 TMS 연결
+
+GUI 실행 후 TMS USB VCP COM 포트를 선택하고 양의 정수 Baud를 입력한 뒤 Connect를 누릅니다. Baud 입력은 현재 GUI/pySerial 설정이며 USB CDC 전송률을 정하지 않습니다. 추력기 UART의 2Mbps는 PC 링크 설정이 아닙니다.
+
+PC는 136바이트 TMS report를 받아 상태, RAW 및 보정된 센서 값을 표시하며 worker에서 100ms 간격으로 Heartbeat를 전송합니다. 미보정 값은 N/A이며, 최신 추력기 보고의 battery_percent는 Thruster Battery (%)로 표시합니다. Start는 Enable Feedback과 500ms 이내 추력기 보고가 필요합니다. Stop은 펌웨어 ID 8을 사용해 Standby로 전환합니다.
+
+실제 Calibration 취득은 Run Feedback 이후 Acquire를 요청합니다. 펌웨어에 계수 echo/ACK가 없어 실제 장비 Apply 버튼은 비활성화되어 있습니다. 종료 전 Stop Feedback을 확인하세요. 현재 창 종료/Disconnect는 확인된 Stop을 기다리지 않으며 최종 차단은 펌웨어 timeout에 의존합니다.
+
+### 펌웨어 SD 파일 읽기
+
+펌웨어 SD 로그는 DATAxxxx.BIN의 512바이트 기록입니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m tms_pc.communication.firmware_log DATA0000.BIN extracted.csv
+```
+
+checksum·counter·runtime을 검증하고 미기록 tail을 제외합니다. 출력은 RAW/valid/calibrated/fault를 보존한 펌웨어 CSV이며, 압력 단위가 미확정이라 canonical 분석 CSV로 직접 사용할 수 없습니다.
 
 ## Mock 사용법
 
@@ -128,7 +146,7 @@ scripts/           Mock 실행 및 예제 생성 보조 스크립트
 
 Timeout, GUI 갱신 주기, 버퍼 및 보정 샘플 상한은 [settings.py](src/tms_pc/config/settings.py)에서 관리합니다. PC/Mock 설정이며 펌웨어 기본값을 의미하지 않습니다.
 
-상단 `Baud (bit/s)`에서 속도를 선택하거나 직접 입력할 수 있습니다. 기본값은 미확정이며 실제 Firmware와 같은 값이 필요합니다. 연결 중 변경은 잠기고 Mock에서는 사용하지 않습니다. Baud 지정으로 실제 Serial 연결 차단이 해제되지는 않습니다.
+상단 `Baud (bit/s)`에서 양의 정수 값을 선택하거나 직접 입력할 수 있습니다. 연결 중 변경은 잠기고 Mock에서는 사용하지 않습니다. USB VCP와 추력기 UART의 전송 설정은 서로 다릅니다.
 
 ## 검증
 
@@ -158,7 +176,9 @@ Timeout, GUI 갱신 주기, 버퍼 및 보정 샘플 상한은 [settings.py](src
 
 ## 현재 제한
 
-실제 연결에는 SOF, Packet ID, framing, CRC, byte order, 센서 단위, Baud, 샘플링 및 ACK/Feedback 정책 확정이 필요합니다. report_t 디코더는 이미 분리된 64바이트 payload만 처리하며 실제 Serial 수신이나 Telemetry 매핑을 활성화하지 않습니다.
+실제 PC 링크는 AB/00 00 + payload + uint32 byte-sum이며 little endian입니다. 송신 명령은 32바이트, 수신 report는 136바이트입니다. 72바이트 report_t는 TMS report 내부의 추력기 데이터입니다. 상세 규격은 [PROTOCOL](docs/PROTOCOL.md)을 참조하세요.
+
+펌웨어 보정 계수 echo/ACK, 명령 응답 correlation, 압력 단위와 아날로그 변환 상수 및 추력기 필드 의미는 추가 확인이 필요합니다. 실제 장비 운용과 패키징 검증은 미완료입니다.
 
 자동 동응답 분석은 구간 내 대표 명령 변화 하나를 분석합니다. 여러 step 자동 분할은 미구현입니다. PNG Export 렌더링은 현재 GUI 스레드에서 수행합니다.
 

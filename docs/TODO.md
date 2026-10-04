@@ -1,5 +1,19 @@
 # TODO / Decisions / Phase Ledger
 
+## 2026-10-04 Upstream update bd60824
+
+기준 commit: bd60824d97615e68efa217bd90a9705edf5408e5. 추력기 battery_percent 추가와 72B payload, 136B PC report/144B frame, 152B SD frame/360B sector padding을 반영했다. 디코더·SD 변환·GUI 배터리 잔량 및 관련 문서를 갱신했다. 변경된 디코더·SD 변환 테스트 23개가 통과했다. 이전 크기는 자동 혼용하지 않는다. 명령·Heartbeat·timeout 정책은 변경되지 않았다.
+
+
+## 2026-10-04 Initial firmware alignment history
+
+기준 upstream commit: 57b17c7fbd167146f64a32b728f3ac71b665c8aa, Rocket Avionics System - Thrust Measurement Board.
+실제 USB VCP용 FirmwareCodec과 연결을 추가했다. AB/00 00 byte-sum framing, 32B command, 128B report, 명시적 mode 값, 100ms Heartbeat, fault 잠금과 300ms STATUS timeout, Calibration Run→Acquire, ID 8 Stop→Standby를 반영했다.
+512B SD sector 변환 CLI를 추가했고 RAW/flags/fault/추력기 payload를 보존한다. 압력 단위가 미확정이므로 canonical CSV 자동 변환은 제공하지 않는다.
+계수 echo/ACK가 없어 실제 GUI Apply는 비활성화한다. 보정 확인, 명령 correlation, 종료 전 Stop 확인, 실제 USB 캡처/장비 테스트, 아날로그 단위 확인이 남아 있다. 아래 이전 기록의 Serial 차단/TBD 내용은 이 변경 이전 이력이다. 현재 규격은 PROTOCOL.md 참조.
+
+검증: 50개 pytest 통과. 명령 golden bytes, 분할/연속 수신, 손상 checksum 복구, NaN/보정 flag, 512B SD counter/tail/손상, Fault 운용 차단, Calibration Run→Acquire, worker Heartbeat 및 STATUS timeout과 기존 Mock 테스트를 포함한다. 실제 장비 검증 결과는 아니다.
+
 ## Latest reference review
 
 Official pySerial, Qt for Python, pyqtgraph and Python struct sources reviewed and recorded in [REFERENCES.md](REFERENCES.md). Implemented configurable serial deadlines/chunk limits and loop:// backend tests, explicit queued QObject slots and owner-thread analysis job cleanup, shared bounded NumPy plot snapshots and display clipping/downsampling. Resolved curve-parent initialization failure found by GUI test. Full suite: 42 passed in 8.41s. Sensor units/framing/CRC are still TBD; real serial GUI remains blocked. Production UART parity/data/stop bits and DTR/RTS/flow-control behavior need Firmware confirmation.

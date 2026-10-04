@@ -26,3 +26,5 @@ class Settings:
     minimum_power_w: float = 1e-6
     hardware_baud: int | None = None
     hardware_protocol: str | None = None
+    hardware_heartbeat_s: float = 0.1
+    hardware_status_timeout_s: float = 0.3

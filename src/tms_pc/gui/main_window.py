@@ -135,6 +135,9 @@ class MainWindow(QMainWindow):
             plot.showGrid(x=True, y=True, alpha=0.2)
             curve = plot.plot(pen=pg.mkPen(COLORS[index], width=2), clipToView=True, autoDownsample=True, downsampleMethod="peak")
             self.live_curves.append((curve, channel))
+            if not hasattr(self, "live_plots"):
+                self.live_plots = []
+            self.live_plots.append((plot, channel, label))
             grid.addWidget(plot, index // 2, index % 2)
         layout.addLayout(grid, 1)
 
@@ -488,15 +491,29 @@ class MainWindow(QMainWindow):
         self.acquire_start.setEnabled(ready and s.mode == Mode.CALIBRATION and not s.acquire)
         self.acquire_stop.setEnabled(ready and s.acquire)
         self.add_point.setEnabled(ready and s.mode == Mode.CALIBRATION and not s.acquire and bool(c.calibration.samples))
-        self.apply_calibration.setEnabled(ready and s.mode == Mode.CALIBRATION and not s.acquire and self.factors is not None)
+        self.apply_calibration.setEnabled(ready and not c.hardware and s.mode == Mode.CALIBRATION and not s.acquire and self.factors is not None)
         self.loss_button.setEnabled(linked and c.transport is not None)
         self.message.setText(c.message)
+        if c.hardware and c.hardware_report is not None:
+            report = c.hardware_report
+            self.status.setText(self.status.text() + f" | ADC valid: {int(report.valid)} | Calibrated bits: {report.calibrated} | Thruster age: {report.thruster_age_ms} ms")
+            self.enable.setEnabled(self.enable.isEnabled() and not c.fault)
+            self.start.setEnabled(self.start.isEnabled() and not c.fault and report.thruster_age_ms <= 500)
+            self.send_thrust.setEnabled(self.send_thrust.isEnabled() and not c.fault)
+            self.acquire_start.setEnabled(self.acquire_start.isEnabled() and not c.fault)
 
     def refresh_live(self) -> None:
         c = self.controller
         t = c.telemetry
         if t:
-            text = f"Runtime {t.runtime:.3f} s   |   Voltage {t.motor_voltage:.3f} V   |   Current {t.motor_current:.3f} A   |   Measured Thrust {t.load_cell:.4f} N   |   Pressure {t.pressure:.3f} kPa"
+            def value(number):
+                return f"{number:.3f}" if np.isfinite(number) else "N/A"
+            pressure_unit = "(firmware unit TBD)" if c.hardware else "kPa"
+            text = f"Runtime {t.runtime:.3f} s   |   Voltage {value(t.motor_voltage)} V   |   Current {value(t.motor_current)} A   |   Measured Thrust {value(t.load_cell)} N   |   Pressure {value(t.pressure)} {pressure_unit}"
+            if c.hardware and c.hardware_report is not None:
+                report = c.hardware_report
+                battery = report.thruster.battery_percent if report.thruster_age_ms <= 500 else np.nan
+                text += f"   |   Thruster Battery {value(battery)} %"
             self.sensor_label.setText(text)
             self.measure_sensor.setText(text)
         else:
@@ -510,6 +527,8 @@ class MainWindow(QMainWindow):
         times, values = c.visualization.snapshot(channels)
         for curve, channel in self.live_curves:
             curve.setData(times, values[channel])
+        for plot, channel, label in self.live_plots:
+            plot.setTitle("Pressure (firmware unit TBD)" if c.hardware and channel == "pressure" else label)
 
     def closeEvent(self, event) -> None:
         self.controller.disconnect()

@@ -39,11 +39,11 @@ class CommunicationManager(QObject):
         self.generation = 0
         self.session = 0
 
-    def connect_transport(self, transport: Transport) -> None:
+    def connect_transport(self, transport: Transport, codec=None) -> None:
         if self.thread and self.thread.is_alive():
             raise ValueError("Disconnect first")
         self.clear_queue()
-        self.codec = MockCodec(self.settings.max_payload)
+        self.codec = codec if codec is not None else MockCodec(self.settings.max_payload)
         self.transport = transport
         self.stop_event.clear()
         self.session += 1
@@ -77,6 +77,7 @@ class CommunicationManager(QObject):
             transport.connect()
             self.connection.emit(session, True, "CONNECTED — awaiting STATUS")
             last_rx = time.monotonic()
+            last_heartbeat = 0.0
             while not self.stop_event.is_set():
                 try:
                     _, _, outgoing = self.queue.get_nowait()
@@ -87,9 +88,12 @@ class CommunicationManager(QObject):
                         if not self.stop_event.is_set() and outgoing.generation == self.generation:
                             transport.send(self.codec.encode(outgoing.packet))
                             self.sent.emit(session, outgoing.token, time.monotonic())
+                if hasattr(self.codec, "ids") and time.monotonic() - last_heartbeat >= self.settings.hardware_heartbeat_s:
+                    transport.send(self.codec.encode(Packet(PacketType.HEARTBEAT, None)))
+                    last_heartbeat = time.monotonic()
                 data = transport.read()
                 for packet in self.codec.feed(data):
-                    if packet.kind in (PacketType.STATUS, PacketType.TELEMETRY, PacketType.FAULT):
+                    if packet.kind in (PacketType.STATUS, PacketType.TELEMETRY, PacketType.FAULT, PacketType.HARDWARE_REPORT):
                         last_rx = time.monotonic()
                         self.packet_received.emit(session, packet)
                 for error in self.codec.errors:

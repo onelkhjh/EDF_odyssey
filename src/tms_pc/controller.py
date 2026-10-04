@@ -4,6 +4,8 @@ import math
 import time
 from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer
 from tms_pc.communication.mock_transport import MockTransport
+from tms_pc.communication.serial_transport import SerialTransport
+from tms_pc.communication.firmware_codec import FirmwareCodec
 from tms_pc.communication.packet import Packet
 from tms_pc.config.settings import Settings
 from tms_pc.managers.communication_manager import CommunicationManager
@@ -53,6 +55,11 @@ class TMSController(QObject):
         self.last_thrust_sent = 0.0
         self.accept_packets = False
         self.reconnect_requested = False
+        self.hardware = False
+        self.hardware_report = None
+        self.last_status_at = 0.0
+        self.calibration_start_requested = False
+        self.hardware_status_lost = False
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(20)
@@ -66,6 +73,8 @@ class TMSController(QObject):
                 return
             raise ValueError("Disconnect first")
         self.reconnect_requested = False
+        self.hardware = False
+        self.hardware_report = None
         self.transport = MockTransport(self.settings)
         self.visualization.samples.clear()
         self.telemetry = None
@@ -99,7 +108,30 @@ class TMSController(QObject):
             self._warn(message)
 
     def connect_serial(self, port: str, baud: int) -> None:
-        raise ValueError("Hardware protocol TBD: real Serial operation is blocked until a reviewed adapter is supplied")
+        if self.communication.thread and self.communication.thread.is_alive():
+            raise ValueError("Disconnect first")
+        if not 0 < self.settings.hardware_heartbeat_s < 0.5:
+            raise ValueError("Firmware heartbeat interval must be below 500 ms")
+        if not 0 < self.settings.hardware_status_timeout_s < 0.5:
+            raise ValueError("STATUS timeout must be below 500 ms")
+        transport = SerialTransport(port, baud, self.settings)
+        self.hardware = True
+        self.hardware_report = None
+        self.last_status_at = 0.0
+        self.calibration_start_requested = False
+        self.hardware_status_lost = False
+        self.transport = None
+        self.telemetry = None
+        self.visualization.samples.clear()
+        self.state = StateManager()
+        self.measurement.reset()
+        self.pending.clear()
+        self.fault = ""
+        self.commanded = 0.0
+        self.message = "CONNECTING / TMS USB VCP (136-byte report)"
+        self.accept_packets = True
+        self.communication.connect_transport(transport, FirmwareCodec())
+        self.changed.emit()
 
     def _warn(self, message: str) -> None:
         self.message = message
@@ -119,6 +151,8 @@ class TMSController(QObject):
             self.commanded = 0.0
             self.telemetry = None
             self.visualization.samples.clear()
+            self.hardware_report = None
+            self.calibration_start_requested = False
         if message != "DISCONNECTED" or "LOST" not in self.message:
             self.message = message
         log.info("Connection %s", message)
@@ -132,6 +166,20 @@ class TMSController(QObject):
         if self.stopping or self.pending:
             raise ValueError("Waiting for command feedback; Stop remains available")
         self.state.guard(kind, value)
+        if self.hardware:
+            if self.hardware_status_lost or (time.monotonic() - self.last_status_at > self.settings.hardware_status_timeout_s and not (kind == PacketType.COMMAND_MODE and value == Mode.SAFE)):
+                raise ValueError("Stale firmware STATUS; reconnect before operating")
+            if kind != PacketType.COMMAND_MODE and self.fault:
+                raise ValueError("Firmware fault or stale STATUS; Stop or explicit mode recovery required")
+            if kind == PacketType.COMMAND_CALIBRATION_FACTOR:
+                raise ValueError("Firmware report has no coefficient echo/ACK; Apply is unavailable until verified feedback is added")
+            if kind == PacketType.COMMAND_MODE_RUN and value and self.state.status.mode == Mode.MEASUREMENT:
+                if self.hardware_report is None or self.hardware_report.thruster_age_ms > 500:
+                    raise ValueError("Start requires fresh thruster report (age <= 500 ms)")
+            if kind == PacketType.COMMAND_CALIBRATION_ACQUIRE and value and not self.state.status.mode_run:
+                self.calibration_start_requested = True
+                self._send(Packet(PacketType.COMMAND_MODE_RUN, True))
+                return
         if kind == PacketType.COMMAND_MODE_RUN and value:
             self.measurement.reset()
         self._send(Packet(kind, value))
@@ -157,7 +205,16 @@ class TMSController(QObject):
         self.measurement.reset()
         self.stopping = True
         self.emergency = emergency
+        self.calibration_start_requested = False
         self.stop_steps = []
+        if self.hardware:
+            # Firmware id=8 atomically zeros/disables/stops and enters Standby.
+            # SAFE mode command performs the same shutdown and enters Safe.
+            if emergency:
+                self._send(Packet(PacketType.COMMAND_MODE, Mode.SAFE), priority=0)
+            else:
+                self._send_hardware_stop()
+            return
         if self.state.status.mode == Mode.MEASUREMENT:
             self.stop_steps.append(Packet(PacketType.COMMAND_THRUST, 0.0))
         self.stop_steps.extend([Packet(PacketType.COMMAND_THRUST_ENABLE, False), Packet(PacketType.COMMAND_MODE_RUN, False)])
@@ -168,6 +225,11 @@ class TMSController(QObject):
         log.info("Measurement Stop / Emergency=%s", emergency)
         self._next_stop()
 
+    def _send_hardware_stop(self) -> None:
+        token = self.communication.submit(Packet(PacketType.STOP, None), priority=0)
+        self.pending[token] = Expectation("stopped", Mode.STANDBY, time.monotonic())
+        self.changed.emit()
+
     def _next_stop(self) -> None:
         if self.stop_steps and self.state.connected:
             self._send(self.stop_steps.pop(0), priority=0)
@@ -177,6 +239,8 @@ class TMSController(QObject):
 
     def _matches(self, expected: Expectation) -> bool:
         s = self.state.status
+        if expected.field == "stopped" or (self.hardware and self.stopping and expected.field == "mode"):
+            return s.mode == expected.value and not s.mode_run and not s.thrust_enable and not s.acquire and abs(s.thrust_command) <= self.settings.thrust_tolerance
         if expected.field == "factors":
             return math.isclose(s.slope, expected.value[0], rel_tol=1e-8) and math.isclose(s.offset, expected.value[1], abs_tol=1e-8)
         observed = getattr(s, expected.field)
@@ -186,6 +250,21 @@ class TMSController(QObject):
 
     def _packet(self, packet: Packet) -> None:
         if not self.accept_packets:
+            return
+        if packet.kind == PacketType.HARDWARE_REPORT:
+            report = packet.value
+            self.hardware_report = report
+            self.last_status_at = time.monotonic()
+            self.fault = report.fault_text
+            # Fault arrives before STATUS processing, so profiles cannot continue on it.
+            if report.fault:
+                self.measurement.reset()
+                self.measurement.use_profile = False
+                self.calibration_start_requested = False
+            self._packet(Packet(PacketType.STATUS, report.status))
+            self._packet(Packet(PacketType.TELEMETRY, report.telemetry))
+            if report.fault:
+                self._warn("TMS FAULT: " + self.fault)
             return
         if packet.kind == PacketType.STATUS:
             self.state.connected = True
@@ -199,18 +278,22 @@ class TMSController(QObject):
                     self._next_stop()
                 elif not self.fault:
                     self.message = "CONNECTED / FEEDBACK CONFIRMED"
+            if self.hardware and self.calibration_start_requested and not self.pending and not self.stopping:
+                self.calibration_start_requested = False
+                if self.state.status.mode == Mode.CALIBRATION and self.state.status.mode_run and not self.fault:
+                    self.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, True)
             if self.state.status.mode_run and not self.stopping and not self.pending and abs(self.commanded - self.state.status.thrust_command) > self.settings.thrust_tolerance:
                 self._warn("COMMAND / TMS STATE MISMATCH")
         elif packet.kind == PacketType.TELEMETRY:
             self.telemetry = packet.value
             self.visualization.append(packet.value, self.state.status.thrust_command)
-            if self.state.status.acquire:
+            if self.state.status.acquire and math.isfinite(packet.value.raw_load_cell):
                 if len(self.calibration.samples) < self.settings.calibration_max_samples:
                     self.calibration.samples.append(packet.value.raw_load_cell)
                 elif not self.pending:
                     self._warn("Calibration sample limit reached; acquisition stop requested")
                     self.request(PacketType.COMMAND_CALIBRATION_ACQUIRE, False)
-            if self.state.status.mode_run and self.measurement.use_profile and not self.stopping:
+            if self.state.status.mode_run and self.measurement.use_profile and not self.stopping and not self.fault:
                 try:
                     command, done = self.measurement.command(packet.value.runtime)
                     if done:
@@ -229,6 +312,17 @@ class TMSController(QObject):
         if self.reconnect_requested and not self.communication.thread.is_alive():
             self.connect_mock()
         now = time.monotonic()
+        if self.hardware and self.state.connected and not self.hardware_status_lost and now - self.last_status_at > self.settings.hardware_status_timeout_s:
+            self.hardware_status_lost = True
+            self._warn("TMS STATUS TIMEOUT / STOP REQUESTED, NOT CONFIRMED")
+            if not self.stopping:
+                self.stop(emergency=True)
+            return
+        if self.hardware_status_lost and not self.stopping:
+            self.disconnect()
+            self.message = "TMS STATUS TIMEOUT / RECONNECT REQUIRED; VERIFY FIRMWARE STOP"
+            self.changed.emit()
+            return
         expired = [token for token, item in self.pending.items() if now - (item.sent_at or item.queued_at) > self.settings.feedback_timeout_s]
         if expired:
             for token in expired:
@@ -259,5 +353,7 @@ class TMSController(QObject):
         self.visualization.samples.clear()
         self.stopping = False
         self.stop_steps.clear()
+        self.hardware_report = None
+        self.calibration_start_requested = False
         self.message = "DISCONNECTED / THRUST COMMAND DISABLED"
         self.changed.emit()

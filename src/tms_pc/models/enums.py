@@ -26,3 +26,6 @@ class PacketType(Enum):
     STATUS = auto()
     TELEMETRY = auto()
     FAULT = auto()
+    HARDWARE_REPORT = auto()
+    HEARTBEAT = auto()
+    STOP = auto()

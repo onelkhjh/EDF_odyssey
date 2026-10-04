@@ -14,5 +14,6 @@ class HardwareReport:
     current_edf: float
     deg_m: FourChannels
     logic_voltage: float
+    battery_percent: float
     subsystem_status: int
     padding: bytes

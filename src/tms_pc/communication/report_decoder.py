@@ -3,16 +3,12 @@ import struct
 from typing import Literal
 from tms_pc.models.report import HardwareReport
 
-REPORT_PAYLOAD_BYTES = 64
-REPORT_STRUCT_FORMAT = "Id12fB3s"
+REPORT_PAYLOAD_BYTES = 72
+REPORT_STRUCT_FORMAT = "Id13fB7s"
 
 
 class ReportDecoder:
-    """Decode an already-framed report_t; framing/CRC are not specified yet.
-
-    Firmware must confirm IEEE-754 binary32/binary64 and byte order.
-    Units/status bits are intentionally not inferred.
-    """
+    """Decode bd60824's packed thruster report; match firmware validity checks."""
 
     def __init__(self, *, byte_order: Literal["little", "big"]) -> None:
         prefixes = {"little": "<", "big": ">"}
@@ -24,13 +20,17 @@ class ReportDecoder:
 
     def decode(self, payload: bytes) -> HardwareReport:
         if len(payload) != REPORT_PAYLOAD_BYTES:
-            raise ValueError(f"report_t requires exactly 64 bytes; received {len(payload)}")
+            raise ValueError(f"report_t requires exactly {REPORT_PAYLOAD_BYTES} bytes; received {len(payload)}")
         values = self.layout.unpack(payload)
-        if not all(math.isfinite(number) for number in values[1:14]):
+        if not all(math.isfinite(number) for number in values[1:15]):
             raise ValueError("report_t contains non-finite sensor/time values")
+        if values[1] < 0:
+            raise ValueError("report_t contains negative ref_time")
+        if any(values[16]):
+            raise ValueError("report_t padding must be zero")
         return HardwareReport(
             packet_counter=values[0], ref_time=values[1], thrust=values[2],
             deg=tuple(values[3:7]), voltage_edf=values[7], current_edf=values[8],
             deg_m=tuple(values[9:13]), logic_voltage=values[13],
-            subsystem_status=values[14], padding=values[15],
+            battery_percent=values[14], subsystem_status=values[15], padding=values[16],
         )
