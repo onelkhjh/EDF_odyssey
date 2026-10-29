@@ -21,7 +21,13 @@ class ThrustProfile:
             raise ValueError("Profile requires at least two finite points")
         if times[0] < 0 or not (np.diff(times) > 0).all() or not ((values >= 0) & (values <= 100)).all():
             raise ValueError("Profile time must increase and thrust must be 0–100%")
-        return cls(times, values)
+        interpolation = "linear"
+        if "interpolation" in frame.columns:
+            modes = frame.interpolation.drop_duplicates().tolist()
+            if len(modes) != 1 or modes[0] not in ("linear", "zoh"):
+                raise ValueError("Profile interpolation must be uniformly linear or zoh")
+            interpolation = modes[0]
+        return cls(times, values, interpolation)
 
     def value(self, time_s: float) -> float:
         if not np.isfinite(time_s):

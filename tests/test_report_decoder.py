@@ -50,8 +50,8 @@ def test_report_nonfinite(offset, fmt):
 def test_report_matches_firmware_padding_and_time_validation():
     data = bytearray(fixture_payload("<"))
     data[71] = 1
-    with pytest.raises(ValueError, match="padding"):
-        ReportDecoder(byte_order="little").decode(data)
+    report = ReportDecoder(byte_order="little").decode(data)
+    assert report.padding == bytes(6) + b"\x01"
     data[71] = 0
     struct.pack_into("<d", data, 4, -1.)
     with pytest.raises(ValueError, match="negative ref_time"):

@@ -12,6 +12,7 @@ from tms_pc.communication.report_decoder import ReportDecoder, REPORT_PAYLOAD_BY
 PC_REPORT_PAYLOAD_BYTES = 136
 PC_REPORT_FRAME_BYTES = PC_REPORT_PAYLOAD_BYTES + 8
 THRUSTER_OFFSET = 60
+RPM_OFFSET = 132
 
 MODES = (Mode.SAFE, Mode.BOOT, Mode.STANDBY, Mode.CALIBRATION, Mode.MEASUREMENT)
 FAULTS = {1: "INIT", 2: "ADC", 4: "SD", 8: "PC_TIMEOUT", 16: "THRUSTER", 32: "DEADLINE", 64: "RX"}
@@ -30,6 +31,7 @@ class FirmwareReport:
     thruster_age_ms: int
     thruster_payload: bytes
     thruster: HardwareReport
+    rpm: float
 
     @property
     def fault_text(self) -> str:
@@ -69,7 +71,8 @@ def decode_report(payload: bytes) -> FirmwareReport:
                           *(float(raw[i]) if valid else math.nan for i in (3, 2, 1, 4)))
     thruster_payload = payload[THRUSTER_OFFSET:THRUSTER_OFFSET + REPORT_PAYLOAD_BYTES]
     thruster = ReportDecoder(byte_order="little").decode(thruster_payload)
-    return FirmwareReport(status, telemetry, raw, bool(valid), calibrated, battery, counter, fault, age, thruster_payload, thruster)
+    rpm = struct.unpack_from("<f", payload, RPM_OFFSET)[0]
+    return FirmwareReport(status, telemetry, raw, bool(valid), calibrated, battery, counter, fault, age, thruster_payload, thruster, rpm)
 
 
 class FirmwareCodec:

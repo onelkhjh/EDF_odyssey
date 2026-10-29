@@ -7,8 +7,8 @@ BAUD_RATE_OPTIONS = (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 
 @dataclass(frozen=True)
 class Settings:
     """PC/simulator settings. These are not firmware defaults."""
-    feedback_timeout_s: float = 1.0
-    connection_timeout_s: float = 2.0
+    feedback_timeout_s: float = 3.0
+    connection_timeout_s: float = 5.0
     mock_watchdog_s: float = 3.0
     mock_period_s: float = 0.05
     mock_command_refresh_s: float = 0.5
@@ -27,4 +27,4 @@ class Settings:
     hardware_baud: int | None = None
     hardware_protocol: str | None = None
     hardware_heartbeat_s: float = 0.1
-    hardware_status_timeout_s: float = 0.3
+    hardware_status_timeout_s: float = 2.0

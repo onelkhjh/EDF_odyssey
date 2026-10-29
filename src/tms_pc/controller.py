@@ -121,8 +121,8 @@ class TMSController(QObject):
             raise ValueError("Disconnect first")
         if not 0 < self.settings.hardware_heartbeat_s < 0.5:
             raise ValueError("Firmware heartbeat interval must be below 500 ms")
-        if not 0 < self.settings.hardware_status_timeout_s < 0.5:
-            raise ValueError("STATUS timeout must be below 500 ms")
+        if not math.isfinite(self.settings.hardware_status_timeout_s) or self.settings.hardware_status_timeout_s <= 0:
+            raise ValueError("STATUS timeout must be finite and positive")
         transport = SerialTransport(port, baud, self.settings)
         self.hardware = True
         self.hardware_report = None
@@ -151,6 +151,7 @@ class TMSController(QObject):
     def _connection(self, connected: bool, message: str) -> None:
         # Transport connect is not valid STATUS feedback.
         if not connected:
+            self.measurement.use_profile = False
             self.recorder.finish()
             self.accept_packets = False
             self.state.connected = False
@@ -171,7 +172,8 @@ class TMSController(QObject):
     def _sent(self, token: int, sent_at: float) -> None:
         if token in self.throttle_tokens:
             value = self.throttle_tokens.pop(token)
-            self.throttle_tx = f"Throttle {value:.2f}%: COM WRITE COMPLETE / check TMS Applied"
+            detail = "waiting for TMS Applied feedback" if token in self.pending else "APPLICATION UNCONFIRMED; requires Measurement + Enable + Start"
+            self.throttle_tx = f"Throttle {value:.2f}%: COM WRITE COMPLETE / {detail}"
             log.info(self.throttle_tx)
             self.changed.emit()
         if token in self.pending:
@@ -262,6 +264,7 @@ class TMSController(QObject):
         self.communication.clear_queue()
         self.pending.clear()
         self.measurement.reset()
+        self.measurement.use_profile = False
         self.stopping = True
         self.emergency = emergency
         self.calibration_start_requested = False
@@ -423,6 +426,7 @@ class TMSController(QObject):
             self.request(PacketType.COMMAND_THRUST, self.commanded)
 
     def disconnect(self) -> None:
+        self.measurement.use_profile = False
         self.recorder.finish()
         self.throttle_tokens.clear()
         self.throttle_tx = "Throttle TX: disconnected"

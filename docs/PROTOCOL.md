@@ -51,13 +51,13 @@ PC 상태 응답에는 보정 계수와 명령 ID/ACK가 없습니다. 현재 GU
 | 44 | float32 | battery_voltage |
 | 48 | uint32 ×3 | counter, fault, thruster_age_ms |
 | 60 | 72 bytes | 추력기 report_t 원본 |
-| 132 | 4 bytes | padding |
+| 132 | float32 | RPM (little endian; replaces the existing 4-byte padding) |
 
 valid=1은 ADC 취득 성공입니다. calibrated bit0은 로드셀, bit1은 아날로그 변환 보정입니다. 미보정 물리량은 펌웨어에서 NaN으로 전송되므로 전체 패킷을 폐기하지 않고 화면에 N/A를 표시합니다. 로드셀 N은 PC에서 기준 하중 N으로 보정할 때 성립합니다. 압력 단위·변환 상수는 board_config.h에서 미확정이므로 kPa로 단정하지 않습니다.
 
 추력기 report_t의 deg_m[4]는 사용자 설명상 서보모터 값입니다. 목표/실제 각도와 단위, deg[4] 및 subsystem_status 비트 의미는 해당 추력기 코드에서 별도 확정이 필요합니다. 72B 원본을 그대로 보존하며 TMS ADC 측정값과 혼합하지 않습니다.
 
-추력기 payload는 offset 60 float32 battery_percent, offset 64 uint8 subsystem_status, offset 65 padding[7]을 사용합니다. PC report 내 절대 offset은 각각 120, 124, 125입니다. ref_time은 음수가 아닌 유한 값, 13개 float는 유한 값, padding[7]은 모두 0이어야 합니다. GUI는 thruster_age_ms <= 500일 때 배터리 잔량을 표시하고 오래된 보고는 N/A로 표시합니다. SD CSV에는 thruster_battery_percent와 72B 원본 hex를 보존합니다. 이전 128B PC payload 및 64B 추력기 payload는 최신 디코더가 수용하지 않습니다.
+추력기 payload는 offset 60 float32 battery_percent, offset 64 uint8 subsystem_status, offset 65 padding[7]을 사용합니다. PC report 내 절대 offset은 각각 120, 124, 125입니다. ref_time은 음수가 아닌 유한 값, 13개 float는 유한 값, padding[7]은 값에 관계없이 원본을 보존하며, 패딩만으로 보고서를 거부하지 않습니다. GUI는 thruster_age_ms <= 500일 때 배터리 잔량을 표시하고 오래된 보고는 N/A로 표시합니다. SD CSV에는 thruster_battery_percent와 72B 원본 hex를 보존합니다. 이전 128B PC payload 및 64B 추력기 payload는 최신 디코더가 수용하지 않습니다.
 
 Fault bits: 0x01 INIT, 0x02 ADC, 0x04 SD, 0x08 PC timeout, 0x10 THRUSTER, 0x20 DEADLINE, 0x40 RX. PC는 Fault 동안 Start/Enable/추력/취득을 차단합니다. 명시적 Mode 요청 후 정상 상태 응답으로 복구합니다.
 
@@ -68,7 +68,7 @@ Fault bits: 0x01 INIT, 0x02 ADC, 0x04 SD, 0x08 PC timeout, 0x10 THRUSTER, 0x20 D
 - ID 8 Stop은 원자적으로 추력 0, Disable, Run/Acquire 해제 후 Standby로 전환합니다. Emergency 요청은 Safe 모드 명령을 사용합니다.
 - PC 및 추력기 timeout은 각각 500ms, 메인 루프 deadline은 100ms입니다.
 - PC worker는 GUI 작업과 독립적으로 100ms마다 ID 7 Heartbeat를 보냅니다.
-- PC STATUS timeout은 기본 300ms이며 Safe 요청을 시도하고 제한 시간 내 응답을 기다린 뒤 재연결을 요구합니다. 요청 송신은 물리적 정지 증명이 아닙니다.
+- PC STATUS timeout은 기본 2초이며 Safe 요청을 시도하고 제한 시간 내 응답을 기다린 뒤 재연결을 요구합니다. 명령 피드백 대기는 3초, 수신 없음 경고는 5초입니다. 요청 송신은 물리적 정지 증명이 아닙니다.
 - PC를 닫거나 연결을 끊으면 Heartbeat가 종료됩니다. 현재 종료는 확인된 Stop을 기다리지 않으므로 운용 중에는 Stop Feedback 확인 후 종료해야 합니다. 최종 출력 차단은 펌웨어 timeout에 의존합니다.
 
 ## SD binary records

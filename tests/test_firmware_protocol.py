@@ -12,12 +12,13 @@ from tms_pc.managers.communication_manager import CommunicationManager
 from tms_pc.config.settings import Settings
 
 
-def report_payload(mode=4, running=1, enable=1, calibrated=3, fault=0):
+def report_payload(mode=4, running=1, enable=1, calibrated=3, fault=0, rpm=12345.5):
     data = bytearray(136)
     struct.pack_into("<4Bf", data, 0, mode, running, 0, enable, 25.0)
     struct.pack_into("<d4f", data, 8, 1.25, 24.0, 3.0, 5.0, 1.0)
     struct.pack_into("<5H2Bf3I", data, 32, 123, 234, 345, 456, 567, 1, calibrated, 12.0, 99, fault, 10)
     struct.pack_into("<fB", data, 120, 87.5, 0xa5)
+    struct.pack_into("<f", data, 132, rpm)
     return bytes(data)
 
 
@@ -58,6 +59,22 @@ def test_fragmentation_checksum_and_stream_recovery():
     assert len(report.thruster_payload) == 72
     assert report.thruster.battery_percent == 87.5
     assert report.thruster.subsystem_status == 0xa5
+    assert all(packet.value.rpm == 12345.5 for packet in packets)
+
+
+def test_rpm_uses_existing_tail_without_changing_frame_boundaries():
+    # IEEE 754 little-endian bytes for 12345.5, independent of fixture packing.
+    payload = report_payload()[:132] + b"\x00\xe6\x40\x46"
+    first = wire(payload)
+    second = wire(report_payload(rpm=0.0))
+    assert len(payload) == 136
+    assert len(first) == len(second) == 144
+    codec = FirmwareCodec()
+    assert codec.feed(first[:-1]) == []
+    packets = codec.feed(first[-1:] + second)
+    assert [packet.value.rpm for packet in packets] == [12345.5, 0.0]
+    assert not codec.errors
+    assert not codec.buffer
 
 
 def test_unqualified_sensor_values_are_not_presented_as_measurements():
@@ -78,12 +95,15 @@ def test_sd_records_gaps_tail_and_corruption(tmp_path):
     source.write_bytes(sector(10) + sector(13) + bytes(1024))
     records = list(iter_records(source))
     assert len(records) == 2 and records[1][2] == 2
+    assert all(record[3].rpm == 12345.5 for record in records)
     output = tmp_path / "out.csv"
     assert export_log(source, output) == 2
     assert "pressure_firmware_units" in output.read_text(encoding="utf-8-sig")
     import csv
     with output.open(encoding="utf-8-sig") as file:
-        assert next(csv.DictReader(file))["thruster_battery_percent"] == "87.5"
+        row = next(csv.DictReader(file))
+        assert row["thruster_battery_percent"] == "87.5"
+        assert float(row["rpm"]) == 12345.5
     with pytest.raises(FileExistsError):
         export_log(source, output)
     source.write_bytes(sector(10) + bytes([1]) + sector(13)[1:])
@@ -128,6 +148,18 @@ def test_explicit_throttle_probe_without_enable_does_not_start(app, fault):
     assert c.communication.queue.empty() and not c.pending
     assert not c.state.status.thrust_enable and not c.state.status.mode_run
     assert "APPLICATION UNCONFIRMED" in c.message
+    c._sent(outgoing.token, time.monotonic())
+    assert "APPLICATION UNCONFIRMED" in c.throttle_tx
+    assert "Enable + Start" in c.throttle_tx
+
+
+def test_profile_stop_releases_manual_throttle(app):
+    c = hardware_controller()
+    c.measurement.use_profile = True
+    c.stop()
+    assert not c.measurement.use_profile
+    assert c.stopping
+    assert c.communication.queue.get_nowait()[2].packet.kind == PacketType.STOP
 
 
 def test_calibration_requires_run_and_never_fabricates_factor_feedback(app):
@@ -198,13 +230,13 @@ def test_worker_sends_real_heartbeat_and_delivers_report(app):
 
 def test_stale_status_sends_safe_then_requires_reconnect(app):
     c = hardware_controller()
-    c.last_status_at = time.monotonic() - 1
+    c.last_status_at = time.monotonic() - c.settings.hardware_status_timeout_s - 0.1
     c._tick()
     assert c.hardware_status_lost and c.stopping
     outgoing = c.communication.queue.get_nowait()[2]
     assert outgoing.packet == Packet(PacketType.COMMAND_MODE, Mode.SAFE)
     for expected in c.pending.values():
-        expected.queued_at -= 2
+        expected.queued_at -= c.settings.feedback_timeout_s + 0.1
     c._tick()
     c._tick()
     assert c.state.connected and c.accept_packets
@@ -214,11 +246,25 @@ def test_stale_status_sends_safe_then_requires_reconnect(app):
     assert "RECONNECT" in c.message
 
 
-def test_old_report_and_corrupt_new_thruster_are_rejected():
+def test_delayed_status_within_tolerance_keeps_link(app):
+    c = hardware_controller()
+    c.last_status_at = time.monotonic() - 1.0
+    c._tick()
+    assert c.state.connected and c.accept_packets
+    assert not c.hardware_status_lost
+    assert not c.stopping
+    assert c.communication.queue.empty()
+
+
+def test_old_report_is_rejected_and_unused_padding_is_preserved():
     with pytest.raises(ValueError, match="136 bytes"):
         decode_report(bytes(128))
     codec = FirmwareCodec()
     data = bytearray(report_payload())
     data[131] = 1
-    assert codec.feed(wire(data) + wire(report_payload()))[0].value.thruster.battery_percent == 87.5
-    assert codec.errors == ["report_t padding must be zero"]
+    packets = codec.feed(wire(data) + wire(report_payload()))
+    assert len(packets) == 2
+    assert packets[0].value.thruster.battery_percent == 87.5
+    assert packets[0].value.thruster.padding == bytes(6) + b"\x01"
+    assert packets[0].value.rpm == 12345.5
+    assert not codec.errors

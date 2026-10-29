@@ -1,0 +1,7 @@
+time_s,thrust_percent,interpolation
+0,30,zoh
+5,40,zoh
+10,50,zoh
+15,40,zoh
+20,30,zoh
+25,0,zoh

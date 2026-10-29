@@ -8,7 +8,7 @@ REPORT_STRUCT_FORMAT = "Id13fB7s"
 
 
 class ReportDecoder:
-    """Decode bd60824's packed thruster report; match firmware validity checks."""
+    """Decode packed thruster reports, preserving unused padding bytes."""
 
     def __init__(self, *, byte_order: Literal["little", "big"]) -> None:
         prefixes = {"little": "<", "big": ">"}
@@ -26,8 +26,6 @@ class ReportDecoder:
             raise ValueError("report_t contains non-finite sensor/time values")
         if values[1] < 0:
             raise ValueError("report_t contains negative ref_time")
-        if any(values[16]):
-            raise ValueError("report_t padding must be zero")
         return HardwareReport(
             packet_counter=values[0], ref_time=values[1], thrust=values[2],
             deg=tuple(values[3:7]), voltage_edf=values[7], current_edf=values[8],

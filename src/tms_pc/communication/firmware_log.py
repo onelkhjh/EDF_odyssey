@@ -46,10 +46,10 @@ def export_log(source, target):
     rows = 0
     with target.open("x", newline="", encoding="utf-8-sig") as output:
         writer = csv.writer(output)
-        writer.writerow(["sector", "record_counter", "missing_counter_count", "runtime", "tms_mode", "running", "acquiring", "thrust_enable", "thrust_command", "motor_voltage", "motor_current", "load_cell", "pressure_firmware_units", "battery_voltage", "raw_load_cell", "raw_pressure", "raw_current", "raw_motor_voltage", "raw_battery_voltage", "valid", "calibrated", "sample_counter", "fault", "thruster_age_ms", "thruster_battery_percent", "thruster_payload_hex"])
+        writer.writerow(["sector", "record_counter", "missing_counter_count", "runtime", "tms_mode", "running", "acquiring", "thrust_enable", "thrust_command", "motor_voltage", "motor_current", "load_cell", "pressure_firmware_units", "battery_voltage", "raw_load_cell", "raw_pressure", "raw_current", "raw_motor_voltage", "raw_battery_voltage", "valid", "calibrated", "sample_counter", "fault", "thruster_age_ms", "thruster_battery_percent", "thruster_payload_hex", "rpm"])
         for sector, counter, missing, report in iter_records(source):
             s, t = report.status, report.telemetry
-            writer.writerow([sector, counter, missing, t.runtime, s.mode.name, int(s.mode_run), int(s.acquire), int(s.thrust_enable), s.thrust_command, t.motor_voltage, t.motor_current, t.load_cell, t.pressure, report.battery_voltage, *report.raw, int(report.valid), report.calibrated, report.counter, report.fault, report.thruster_age_ms, report.thruster.battery_percent, report.thruster_payload.hex()])
+            writer.writerow([sector, counter, missing, t.runtime, s.mode.name, int(s.mode_run), int(s.acquire), int(s.thrust_enable), s.thrust_command, t.motor_voltage, t.motor_current, t.load_cell, t.pressure, report.battery_voltage, *report.raw, int(report.valid), report.calibrated, report.counter, report.fault, report.thruster_age_ms, report.thruster.battery_percent, report.thruster_payload.hex(), report.rpm])
             rows += 1
     return rows
 

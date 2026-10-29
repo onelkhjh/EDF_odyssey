@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, Q
 from tms_pc.controller import TMSController
 from tms_pc.config.settings import BAUD_RATE_OPTIONS
 from tms_pc.communication.serial_transport import available_ports
+from tms_pc.communication.firmware_log import export_log
 from tms_pc.models.enums import Mode, PacketType, MeasurementState
 from tms_pc.models.measurement import ThrustProfile
 from tms_pc.managers.analysis_manager import AnalysisManager, AnalysisResult, analyze, export_result
@@ -262,6 +263,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.constant)
         self.send_thrust = self.button(row, "Send Throttle Command", lambda: self.controller.send_throttle(self.constant.value()))
         self.profile_on = QCheckBox("Use CSV Profile")
+        self.profile_on.toggled.connect(lambda _: self.update_state())
         row.addWidget(self.profile_on)
         self.load_profile_button = self.button(row, "Load Profile CSV", self.load_profile)
         layout.addLayout(row)
@@ -286,6 +288,7 @@ class MainWindow(QMainWindow):
             raise ValueError("Load a validated profile first")
         self.controller.measurement.use_profile = self.profile_on.isChecked()
         self.controller.request(PacketType.COMMAND_MODE_RUN, True)
+        logging.getLogger(__name__).info("Measurement start requested: CSV profile=%s", self.controller.measurement.use_profile)
 
     def load_profile(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Profile CSV", "examples", "CSV (*.csv)")
@@ -306,6 +309,13 @@ class MainWindow(QMainWindow):
         self.datasets = []
         self.results: list[AnalysisResult] = []
         self.analysis_busy = False
+        row = QHBoxLayout()
+        self.parse_bin_button = self.button(row, "BIN → CSV", self.parse_bin)
+        layout.addLayout(row)
+        self.bin_status = QLabel("SD BIN files can be extracted to CSV, including RPM.")
+        self.bin_status.setWordWrap(True)
+        self.bin_status.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.bin_status)
         row = QHBoxLayout()
         self.load_csv_button = self.button(row, "Load CSV Files", self.load_analysis)
         self.align = QCheckBox("Align Start Time")
@@ -349,11 +359,30 @@ class MainWindow(QMainWindow):
 
     def set_analysis_busy(self, busy: bool) -> None:
         self.analysis_busy = busy
+        self.parse_bin_button.setEnabled(not busy)
         self.load_csv_button.setEnabled(not busy)
         self.analyze_button.setEnabled(not busy)
         self.export_csv_button.setEnabled(not busy and bool(self.results))
         if busy:
             self.analysis_text.setPlainText("Working in background…")
+
+    def parse_bin(self) -> None:
+        if self.analysis_busy:
+            return
+        source, _ = QFileDialog.getOpenFileName(self, "Select SD BIN file", "", "BIN (*.bin *.BIN)")
+        if not source:
+            return
+        default = Path.cwd() / "artifacts" / (Path(source).stem + "_parsed.csv")
+        target, _ = QFileDialog.getSaveFileName(self, "Save extracted CSV (choose a new filename)", str(default), "CSV (*.csv)")
+        if not target:
+            return
+        target = str(Path(target).with_suffix(".csv"))
+        if Path(target).exists():
+            self.show_error("Output already exists. Choose a new CSV filename.")
+            return
+        self.set_analysis_busy(True)
+        self.bin_status.setText(f"Extracting: {source}\nCSV: {target}")
+        self.analysis_manager.submit(lambda: ("bin", target, export_log(source, target)))
 
     def load_analysis(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Canonical TMS CSV", "examples", "CSV (*.csv)")
@@ -362,6 +391,8 @@ class MainWindow(QMainWindow):
             self.analysis_manager.load(paths)
 
     def analysis_failed(self, message: str) -> None:
+        if self.bin_status.text().startswith("Extracting:"):
+            self.bin_status.setText("BIN extraction failed: " + message)
         self.set_analysis_busy(False)
         self.show_error(message)
         self.analysis_text.setPlainText(message)
@@ -373,12 +404,19 @@ class MainWindow(QMainWindow):
                 self.show_error("Profile arrived while running; Stop before replacing profile")
                 return
             self.controller.measurement.profile = profile
+            logging.getLogger(__name__).info("CSV profile loaded: %s, duration=%.3f s, interpolation=%s", path, profile.times[-1], profile.interpolation)
             self.profile_plot.clear()
             self.profile_plot.plot(profile.times, profile.commands, pen=pg.mkPen("#2563eb", width=2))
             self.profile_plot.addItem(self.profile_marker)
-            self.profile_info.setText(f"{Path(path).name}: {len(profile.times)} points, duration {profile.times[-1]:.3f} s")
+            self.profile_info.setText(f"{Path(path).name}: {len(profile.times)} points, duration {profile.times[-1]:.3f} s | Check Use CSV Profile to run this file; uncheck for manual throttle.")
             return
         self.set_analysis_busy(False)
+        if isinstance(result, tuple) and result[0] == "bin":
+            _, target, count = result
+            text = f"Extracted {count:,} records (including RPM).\nCSV: {target}"
+            self.bin_status.setText(text)
+            self.analysis_text.setPlainText(text + "\n\nLoad-cell zero offset is unchanged. Uncalibrated analog values are NaN.\nPressure remains in firmware units; confirm units before using CSV analysis.")
+            return
         if isinstance(result, tuple) and result[0] == "export":
             self.analysis_text.appendPlainText("Exported:\n" + "\n".join(str(p) for p in result[1]))
             return
@@ -504,10 +542,12 @@ class MainWindow(QMainWindow):
                               ((c.hardware and s.mode == Mode.CALIBRATION) or (not s.mode_run and not s.acquire)))
         self.enable.setEnabled(ready and s.mode == Mode.MEASUREMENT and not s.mode_run and not s.thrust_enable and c.state.measurement != MeasurementState.FINISHED)
         self.start.setEnabled(ready and c.state.measurement == MeasurementState.READY)
+        self.start.setText("Start CSV Profile" if self.profile_on.isChecked() else "Start")
         self.enable.setText("Thrust ENABLED" if linked and s.thrust_enable else "Enable Thrust")
         for button in (self.disable, self.stop, self.emergency):
             button.setEnabled(linked and not c.stopping)
         self.send_thrust.setEnabled(ready and (c.hardware or c.state.measurement == MeasurementState.RUNNING) and not c.measurement.use_profile)
+        self.send_thrust.setText("Send Throttle Command")
         self.send_thrust.setToolTip("추력기 전원·보고 없이도 TMS에 스로틀 명령을 전송합니다. EDF 적용은 펌웨어의 Enable + Start 조건에 따릅니다.")
         self.load_profile_button.setEnabled(not s.mode_run)
         self.profile_on.setEnabled(not s.mode_run)

@@ -101,6 +101,8 @@ Calibration 모드에서 기준 하중(N)을 입력하고 샘플 수집을 시�
 
 ### CSV 분석 및 내보내기
 
+SD 카드의 `DATAxxxx.BIN`은 Analysis 화면의 `BIN → CSV`에서 선택하고 새 CSV 저장 경로를 지정하면 추출됩니다. 변환은 백그라운드에서 실행되며 완료 시 저장 위치와 기록 수를 표시합니다. RPM을 포함하고 기존 CSV는 덮어쓰지 않습니다. 출력의 압력은 펌웨어 단위이므로 분석에 사용하기 전에 단위를 확인해야 합니다.
+
 1. Analysis 화면의 `Load CSV Files`로 [examples/sample_log.csv](examples/sample_log.csv) 또는 분석할 파일들을 선택합니다.
 2. 검증 결과를 확인하고 분석 시작·종료 시간과 채널을 선택합니다.
 3. `Analyze Range`로 분석합니다. `Align Start Time`은 비교 그래프 시간 정렬에만 적용됩니다.
